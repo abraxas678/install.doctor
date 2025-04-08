@@ -752,10 +752,10 @@ installNix() {
   if ! command -v nix-shell > /dev/null; then
     if [ -d /Applications ] && [ -d /System ]; then
       ### macOS
-      gum log -sl info 'Installing nix for macOS' && sh <(curl -L https://nixos.org/nix/install) --yes
+      gum log -sl info 'Installing nix for macOS' && curl -L https://nixos.org/nix/install | sh -s -- --daemon --yes
     else
       ### Linux
-      gum log -sl info 'Installing nix' && sh <(curl -L https://nixos.org/nix/install) --daemon --yes
+      gum log -sl info 'Installing nix' && curl -L https://nixos.org/nix/install | sh -s -- --daemon --yes
     fi
   fi
 }

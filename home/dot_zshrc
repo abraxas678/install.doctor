@@ -506,3 +506,4 @@ fi
 if [ "$TERM_PROGRAM" = 'WarpTerminal' ]; then
   printf '\eP$f{"hook": "SourcedRcFileForWarp", "value": { "shell": "zsh"}}\x9c'
 fi
+

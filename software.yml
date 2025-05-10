@@ -238,6 +238,18 @@ softwarePackages:
     _short: "aiac is a Go library for building AI applications with a focus on simplicity and ease of use.                                                                                                             "
     brew: gofireflyio/aiac/aiac
     go: github.com/gofireflyio/aiac/v3@latest
+  yazi:
+    _bin: yazi
+    _name: Yazi
+    _todo: https://yazi-rs.github.io/docs/installation dependencies
+    _github: https://github.com/sxyazi/yazi
+    brew: yazi
+    pacman: yazi
+    nixos: nixos.yazi
+    scoop: yazi
+    winget: sxyazi.yazi
+    flatpak: io.github.sxyazi.yazi
+    cargo: --locked yazi-fm yazi-cli
   aicommits:
     _bin: aicommits
     _desc: "The repository at https://github.com/Nutlope/aicommits appears to be a project related to artificial intelligence commits. It likely contains code, documentation, or resources related to AI development \nor version control of AI projects. To get a more detailed understanding, you can explore the repository's contents, such as the README file, code files, and any documentation provided.                  "
@@ -284,6 +296,20 @@ softwarePackages:
     choco: airtame
     flatpak: com.airtame.Client
     snap: airtame-application
+  invoice:
+    _bin: invoice
+    _github: https://github.com/maaslalani/invoice
+    _name: Invoice
+    go: github.com/maaslalani/invoice@main
+  flyctl:
+    _bin: flyctl
+    _github: https://github.com/superfly/flyctl
+    _home: https://fly.io/
+    _docs: https://fly.io/docs/
+    _name: Fly CLI
+    brew: flyctl
+    script:linux: curl -L https://fly.io/install.sh | sh
+    script:windows: pwsh -Command "iwr https://fly.io/install.ps1 -useb | iex"
   alda:
     _bin: alda
     _desc: "Alda is a music programming language for musicians to write and play music. It allows users to compose music using text-based commands and play it back instantly. Alda is designed to be simple and      \nintuitive, making it easy for both beginners and experienced musicians to create music. It supports various musical elements like notes, rhythms, chords, and more. The code written in Alda can be saved \nas text files, making it easy to share and collaborate on musical compositions. It is a versatile tool for music enthusiasts looking to experiment with music composition in a unique way.                "

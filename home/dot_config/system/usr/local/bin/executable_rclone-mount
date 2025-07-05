@@ -10,6 +10,18 @@
 
 set -euo pipefail
 
+# Exit script early if macOS and macFUSE is not available
+if [ -d /Applications ] && [ -d /System ]; then
+  # Check for macFUSE system extension (newer macOS)
+  if ! systemextensionsctl list | grep -q 'osxfuse'; then
+    # Optionally fallback to checking kext (older versions)
+    if ! kextstat | grep -q 'macFUSE'; then
+      sleep 10
+      exit 1
+    fi
+  fi
+fi
+
 ### Functions
 
 # @description Log messages with timestamps

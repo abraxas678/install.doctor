@@ -954,6 +954,14 @@ softwarePackages:
     cask: beekeeper-studio
     choco: beekeeper-studio
     flatpak: io.beekeeperstudio.Studio
+  rustic:
+    _bin: rustic
+    _github: https://github.com/rustic-rs/rustic
+    _home: https://rustic.cli.rs/
+    _name: Rustic
+    cargo: --locked rustic-rs
+    brew: rustic
+    scoop: rustic
   beets:
     _bin: beet
     _desc: The purpose of [Beets](https://beets.io/) is to get your music collection right once and for all. It catalogs your collection, automatically improving its metadata as it goes using the MusicBrainz database. Then it provides a bouquet of tools for manipulating and accessing your music.
@@ -1015,6 +1023,13 @@ softwarePackages:
       fi
     _short: "Betwixt is a web debugging proxy based on Chrome DevTools Network panel with a focus on simplicity and ease of use.                                                                                       "
     cask: betwixt
+  repomix:
+    _bin: repomix
+    _name: Repomix
+    _home: https://repomix.com/
+    _github: https://github.com/yamadashy/repomix
+    brew: repomix
+    npm: repomix
   bfg:
     _bin: bfg
     _desc: "BFG Repo-Cleaner is a tool designed to remove large or problematic files from Git repositories. It's particularly useful for cleaning up repositories before sharing or migrating them. The tool operates \nmuch faster than Git's built-in filter-branch and offers a simpler syntax for specifying files to be removed. It can help reduce the size of repositories by eliminating unwanted files and history,      \nmaking them more manageable. BFG Repo-Cleaner is commonly used for tasks like removing sensitive data, large binaries, or other unwanted files from Git history.                                          "

@@ -802,11 +802,7 @@ zapInstall() {
 # @exitcode 0 If installation succeeded.
 # @exitcode 1 If installation failed.
 installNixOS() {
-    if [ -n "${CI:-}" ]; then
-        curl -L https://nixos.org/nix/install | sh
-    else
-        sh <(curl -L https://nixos.org/nix/install)
-    fi
+    curl -L https://nixos.org/nix/install | sh -s -- --daemon
     gum log -sl info "NixOS installation script executed."
 }
 

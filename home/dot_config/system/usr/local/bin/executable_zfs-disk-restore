@@ -1,0 +1,414 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+set -Eeuo pipefail
+
+## zfs-disk-restore
+##
+## Restore artifacts created by `zfs-disk-backup`:
+##   1) Apply FULL replication stream (zfs-rpool.full.zst)
+##   2) Apply a cumulative INCR stream (latest symlink or chosen)
+##
+## Extras:
+##   • Auto-mounts a device labeled WRITELOCK at /write-lock if needed
+##     (or bind-mounts if it’s mounted elsewhere).
+##   • --overwrite-root: true overwrite if pool idle; otherwise auto-staged restore.
+##   • --activate-staged: promote a staged restore to canonical ROOT (no receive).
+##   • --mount: mount restored datasets (overwrite = all; staged = subtree).
+##
+## Typical live-ISO flow:
+##   sudo zpool import -N rpool
+##   # (plug in your USB; script will auto-mount LABEL=WRITELOCK to /write-lock)
+##   sudo zfs-disk-restore rpool --overwrite-root --yes --mount
+##
+## Usage (restore):
+##   sudo zfs-disk-restore <POOL> [--ts YYYYmmdd-HHMMSS | --incr-file /path/incr.zst]
+##                         [--into NAME] [--overwrite-root] [--mount]
+##                         [--preview] [--yes|-y] [--debug]
+##
+## Usage (activate staged → ROOT):
+##   sudo zfs-disk-restore <POOL> --activate-staged [--staged __staged-<ts>] [--mount] [--yes|-y]
+##
+## SAFETY
+##   - You cannot overwrite the pool you’re booted from; script stages instead.
+##   - Activation requires the target pool to be idle (booted from elsewhere).
+
+# ------------------------------ Config ---------------------------------
+DEST_DIR="${DEST_DIR:-/write-lock}"
+FULL="${FULL:-zfs-rpool.full.zst}"
+INCR_BASENAME="${INCR_BASENAME:-zfs-rpool}"
+RECEIVE_FLAGS="${RECEIVE_FLAGS:--d -F -u}"
+ZSTD_THREADS="${ZSTD_THREADS:-2}"
+MBUF_SIZE="${MBUF_SIZE:-1G}"
+LOG_FILE="${LOG_FILE:-/var/log/zfs-disk-restore.log}"
+FORCE="${FORCE:-0}"
+
+DEST_DIR="${DEST_DIR%/}"
+FULL_PATH="${DEST_DIR}/${FULL}"
+INCR_SYMLINK="${DEST_DIR}/${INCR_BASENAME}.incr.zst"
+
+# ------------------------------ CLI ------------------------------------
+DEBUG_FLAG=0
+TARGET_POOL=""
+SELECT_TS=""
+EXPLICIT_INCR=""
+PREVIEW=0
+OVERWRITE_ROOT=0
+INTO_NAME=""
+DO_MOUNT=0
+
+# Activation mode
+ACTIVATE_STAGED=0
+STAGED_NAME=""     # e.g. __staged-20250830-012233
+
+usage() {
+  cat <<EOF
+Usage:
+  Restore FULL+INCR:
+    $0 <TARGET_POOL> [--ts YYYYmmdd-HHMMSS | --incr-file /path/incr.zst]
+                     [--into NAME] [--overwrite-root] [--mount]
+                     [--preview] [--yes|-y] [--debug]
+
+  Activate a staged restore (no receive):
+    $0 <TARGET_POOL> --activate-staged [--staged __staged-<ts>] [--mount] [--yes|-y] [--debug]
+
+Options:
+  --ts <YYYYmmdd-HHMMSS>       Use a specific timestamped incremental.
+  --incr-file <path.incr.zst>  Use an explicit incremental file path.
+  --into <name>                Restore under POOL/<name> (default: restore-<ts> if not overwriting).
+  --overwrite-root             If pool idle: wipe and restore under POOL (dangerous).
+                               If pool busy: auto-stage under POOL/__staged-<ts>.
+  --mount                      Mount datasets after success.
+  --preview                    Only dump stream structure (no changes).
+  --activate-staged            Promote a staged tree (no receive). Use with --staged or auto-detect newest.
+  --staged <__staged-...>      Which staged subtree to activate; default: newest __staged-* under POOL.
+  --yes | -y                   Skip confirmations.
+  --debug                      Shell trace.
+  -h | --help                  This help.
+
+Environment:
+  DEST_DIR, FULL, INCR_BASENAME, RECEIVE_FLAGS, ZSTD_THREADS, MBUF_SIZE, LOG_FILE
+EOF
+}
+
+while (( $# )); do
+  case "$1" in
+    --debug) DEBUG_FLAG=1 ;;
+    --yes|-y) FORCE=1 ;;
+    --ts) shift; SELECT_TS="${1:-}"; [[ -z "$SELECT_TS" ]] && { echo "Missing value for --ts"; exit 2; } ;;
+    --incr-file) shift; EXPLICIT_INCR="${1:-}"; [[ -z "$EXPLICIT_INCR" ]] && { echo "Missing value for --incr-file"; exit 2; } ;;
+    --preview) PREVIEW=1 ;;
+    --overwrite-root) OVERWRITE_ROOT=1 ;;
+    --into) shift; INTO_NAME="${1:-}"; [[ -z "$INTO_NAME" ]] && { echo "Missing value for --into"; exit 2; } ;;
+    --mount) DO_MOUNT=1 ;;
+    --activate-staged) ACTIVATE_STAGED=1 ;;
+    --staged) shift; STAGED_NAME="${1:-}"; [[ -z "$STAGED_NAME" ]] && { echo "Missing value for --staged"; exit 2; } ;;
+    -h|--help) usage; exit 0 ;;
+    -*)
+      echo "Unknown option: $1"; usage; exit 2 ;;
+    *)
+      if [[ -z "$TARGET_POOL" ]]; then TARGET_POOL="$1"; else echo "Unexpected argument: $1"; usage; exit 2; fi
+      ;;
+  esac
+  shift
+done
+
+(( DEBUG_FLAG )) && set -x
+[[ -n "$TARGET_POOL" ]] || { usage; exit 2; }
+
+# --------------------------- Styled logging ----------------------------
+mkdir -p "$(dirname "$LOG_FILE")" || true
+touch "$LOG_FILE" 2>/dev/null || true
+_is_tty() { [[ -t 1 ]] && [[ -w /dev/tty ]]; }
+ts() { date '+%F %T'; }
+if _is_tty; then CI="\033[1;36m"; CG="\033[1;32m"; CY="\033[1;33m"; CR="\033[1;31m"; CN="\033[0m"; else CI=""; CG=""; CY=""; CR=""; CN=""; fi
+log()  { local m="$*"; printf "[%s] %s\n" "$(ts)" "$m" >> "$LOG_FILE"; _is_tty && printf "%b[%s]%b %s\n" "$CI" "$(ts)" "$CN" "$m" > /dev/tty; }
+ok()   { local m="$*"; printf "[%s] %s\n" "$(ts)" "$m" >> "$LOG_FILE"; _is_tty && printf "%b[%s]%b %s\n" "$CG" "$(ts)" "$CN" "$m" > /dev/tty; }
+warn() { local m="$*"; printf "[%s] %s\n" "$(ts)" "$m" >> "$LOG_FILE"; _is_tty && printf "%b[%s]%b %s\n" "$CY" "$(ts)" "$CN" "$m" > /dev/tty; }
+die()  { local m="ERROR: $*"; printf "[%s] %s\n" "$(ts)" "$m" >> "$LOG_FILE"; _is_tty && printf "%b[%s]%b %s\n" "$CR" "$(ts)" "$CN" "$m" > /dev/tty; exit 1; }
+
+on_error() { local ec=$? ln=${BASH_LINENO[0]:-?}; warn "Error on or near line $ln (exit $ec)."; exit "$ec"; }
+trap on_error ERR INT TERM
+
+# ----------------------------- Preflight --------------------------------
+[[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run as root"
+
+need() { command -v "$1" >/dev/null 2>&1; }
+missing=(); for c in zfs zstd mbuffer pv findmnt; do need "$c" || missing+=("$c"); done
+if ((${#missing[@]})); then
+  if need apt-get; then
+    log "Installing missing deps via apt-get: ${missing[*]}"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y --no-install-recommends zfsutils-linux zstd mbuffer pv util-linux
+  else
+    die "Please install: ${missing[*]}"
+  fi
+else
+  ok "All dependencies present."
+fi
+
+# ---------------------- Auto-mount WRITELOCK to /write-lock --------------
+ensure_writelock_mounted() {
+  local want_dir="/write-lock"
+  local dev=""
+  local current=""
+  mkdir -p "$want_dir"
+
+  # If FULL already readable where we expect it, we're done
+  if [[ -r "$FULL_PATH" ]]; then
+    ok "Found FULL at ${FULL_PATH} (no auto-mount needed)."
+    return 0
+  fi
+
+  # Prefer /dev/disk/by-label/WRITELOCK
+  if [[ -e /dev/disk/by-label/WRITELOCK ]]; then
+    dev="$(readlink -f /dev/disk/by-label/WRITELOCK || true)"
+  else
+    # Fallback: try blkid scan for LABEL="WRITELOCK"
+    dev="$(blkid -t LABEL='WRITELOCK' -o device 2>/dev/null | head -n1 || true)"
+  fi
+
+  if [[ -z "$dev" ]]; then
+    warn "Device with LABEL=WRITELOCK not found. Please label your partition and/or plug it in."
+    return 1
+  fi
+
+  # Is it already mounted somewhere?
+  current="$(findmnt -no TARGET -S "$dev" 2>/dev/null || true)"
+  if [[ -n "$current" ]]; then
+    # Bind-mount into /write-lock if mounted elsewhere
+    if [[ "$current" != "$want_dir" ]]; then
+      warn "LABEL=WRITELOCK is mounted at ${current}; bind-mounting it to ${want_dir}"
+      mount --bind "$current" "$want_dir" || die "Bind-mount failed."
+    fi
+  else
+    # Mount it fresh (let mount auto-detect fs)
+    log "Mounting ${dev} at ${want_dir}"
+    mount -o rw,noatime,nodiratime "$dev" "$want_dir" || die "Mount ${dev} → ${want_dir} failed."
+  fi
+
+  # Re-evaluate path after mounting
+  if [[ -r "$FULL_PATH" ]]; then
+    ok "Mounted WRITELOCK; found FULL at ${FULL_PATH}."
+    return 0
+  else
+    warn "Mounted WRITELOCK, but ${FULL_PATH} not found. Check filenames in ${want_dir}."
+    return 1
+  fi
+}
+
+# Try to ensure /write-lock is mounted with the backups before checking the files
+ensure_writelock_mounted || true
+
+zpool list "$TARGET_POOL" >/dev/null 2>&1 || die "Target pool '$TARGET_POOL' not found."
+if (( ACTIVATE_STAGED == 0 )); then
+  [[ -r "$FULL_PATH" ]] || die "FULL not found/readable: $FULL_PATH (ensure /write-lock contains your .zst files)"
+fi
+
+# ----------------------------- Common helpers ----------------------------
+pool_is_busy() {
+  zfs list -H -o mounted -r "$TARGET_POOL" 2>/dev/null | grep -q '^yes$'
+}
+dataset_exists() { zfs list -H -o name "$1" >/dev/null 2>&1; }
+
+# -------------------------------------------------------------------------
+# ACTIVATION MODE (no receive): --activate-staged
+# -------------------------------------------------------------------------
+if (( ACTIVATE_STAGED )); then
+  if pool_is_busy; then
+    die "Activation requires the target pool to be idle/unmounted. Boot from another OS/pool or live ISO."
+  fi
+
+  # Auto-detect newest __staged-* if not provided
+  if [[ -z "$STAGED_NAME" ]]; then
+    STAGED_NAME="$(zfs list -H -o name -r "$TARGET_POOL" 2>/dev/null \
+      | awk -F/ -v p="$TARGET_POOL" 'index($0,p"/__staged-")==1 {print $0}' \
+      | awk -F/ '{print $2}' | sort | tail -n1)"
+    [[ -n "$STAGED_NAME" ]] || die "No __staged-* subtree found under ${TARGET_POOL}. Nothing to activate."
+    log "Auto-selected staged subtree: ${STAGED_NAME}"
+  fi
+
+  STAGED_ROOT="${TARGET_POOL}/${STAGED_NAME}"
+  [[ "$STAGED_ROOT" == ${TARGET_POOL}/__staged-* ]] || die "Invalid staged name: ${STAGED_NAME}"
+  dataset_exists "$STAGED_ROOT" || die "Staged dataset not found: ${STAGED_ROOT}"
+
+  STAGED_ROOT_DIR="${STAGED_ROOT}/ROOT"
+  dataset_exists "$STAGED_ROOT_DIR" || die "Expected ${STAGED_ROOT_DIR} to exist within staged subtree."
+
+  ts_now="$(date +%Y%m%d-%H%M%S)"
+  ROOT_DS="${TARGET_POOL}/ROOT"
+
+  warn "Activation will rename ${STAGED_ROOT}/ROOT → ${ROOT_DS} and set mountpoints/bootfs."
+  if dataset_exists "$ROOT_DS"; then
+    warn "Existing ${ROOT_DS} found; will rename to ${ROOT_DS}.old-${ts_now}"
+  fi
+  (( FORCE==1 )) || { read -r -p "Proceed with activation? (yes/no) " ans; [[ "$ans" == "yes" ]] || die "Aborted."; }
+
+  # Rename existing ROOT out of the way (if present)
+  if dataset_exists "$ROOT_DS"; then
+    zfs rename -f "$ROOT_DS" "${ROOT_DS}.old-${ts_now}"
+    ok "Renamed existing ROOT to ${ROOT_DS}.old-${ts_now}"
+  fi
+
+  # Promote staged ROOT to canonical ROOT
+  zfs rename -f "$STAGED_ROOT_DIR" "$ROOT_DS"
+  ok "Promoted ${STAGED_ROOT_DIR} → ${ROOT_DS}"
+
+  # Remove the now-empty staged container (best-effort)
+  if dataset_exists "$STAGED_ROOT"; then
+    zfs destroy -r "$STAGED_ROOT" || true
+  fi
+
+  # Clear temporary receive-time overrides and set proper mountpoints
+  zfs inherit -r mountpoint "$ROOT_DS" || true
+  zfs set canmount=on -r "$ROOT_DS" || true
+  zfs set mountpoint=/ "$ROOT_DS" || true
+
+  # Try to select a bootfs if obvious (single child under ROOT)
+  BOOTFS_CANDIDATES=()
+  mapfile -t BOOTFS_CANDIDATES < <(zfs list -H -o name -t filesystem -r "$ROOT_DS" \
+    | awk -v root="$ROOT_DS" -F/ '$0 ~ "^"root"/" { if (split($0,a,"/")==3) print $0 }')
+
+  if (( ${#BOOTFS_CANDIDATES[@]} == 1 )); then
+    zpool set bootfs="${BOOTFS_CANDIDATES[0]}" "$TARGET_POOL" || true
+    ok "Set bootfs=${BOOTFS_CANDIDATES[0]} on ${TARGET_POOL} (auto-selected)."
+  else
+    warn "Multiple or zero bootfs candidates under ${ROOT_DS}. Set manually if needed, e.g.:"
+    warn "  zpool set bootfs=${TARGET_POOL}/ROOT/<YOUR-ROOT-DATASET> ${TARGET_POOL}"
+  fi
+
+  if (( DO_MOUNT )); then
+    zfs mount -a || warn "Some filesystems may need manual mounting."
+    ok "Activation mount complete."
+  else
+    log "Activation complete. Use 'zfs mount -a' when ready."
+  fi
+
+  ok "Activation finished."
+  exit 0
+fi
+
+# -------------------------------------------------------------------------
+# RESTORE MODE (receive FULL + INCR)
+# -------------------------------------------------------------------------
+choose_incr() {
+  if [[ -n "$EXPLICIT_INCR" ]]; then echo "$EXPLICIT_INCR"; return; fi
+  if [[ -n "$SELECT_TS" ]]; then echo "${DEST_DIR}/${INCR_BASENAME}.${SELECT_TS}.incr.zst"; return; fi
+  echo "$INCR_SYMLINK"
+}
+INCR_PATH="$(choose_incr)"
+if [[ -L "$INCR_PATH" ]]; then INCR_REAL="$(realpath -m "$INCR_PATH" 2>/dev/null || readlink -f "$INCR_PATH")"; else INCR_REAL="$INCR_PATH"; fi
+if [[ ! -r "$INCR_REAL" ]]; then warn "Incremental not found/readable: ${INCR_REAL} — proceeding with FULL only."; INCR_REAL=""; fi
+
+ts_now="$(date +%Y%m%d-%H%M%S)"
+RECEIVE_PROPS=()  # extra -o/-x receive properties for staged mode
+STAGED_MODE=0
+
+if (( OVERWRITE_ROOT )); then
+  if pool_is_busy; then
+    STAGED_MODE=1
+    warn "--overwrite-root requested but ${TARGET_POOL} is busy → switching to SAFE STAGED RESTORE."
+    RESTORE_ROOT="${TARGET_POOL}/__staged-${ts_now}"
+    STAGED_MOUNT="/mnt/zfs-restore-${ts_now}"
+    RECEIVE_PROPS+=( -x mountpoint -o "mountpoint=${STAGED_MOUNT}" -o "canmount=noauto" )
+  else
+    RESTORE_ROOT="${TARGET_POOL}"
+  fi
+else
+  if [[ -z "$INTO_NAME" ]]; then INTO_NAME="restore-${ts_now}"; fi
+  RESTORE_ROOT="${TARGET_POOL}/${INTO_NAME}"
+fi
+
+log "Restore root target: ${RESTORE_ROOT}"
+log "Receive flags: ${RECEIVE_FLAGS}"
+log "FULL: ${FULL_PATH}"
+log "INCR: ${INCR_REAL:-<none>}"
+
+# Preview only
+if (( PREVIEW )); then
+  need zstreamdump || die "Preview requires zstreamdump."
+  log "Previewing FULL stream…"
+  zstd -d -q -c -- "$FULL_PATH" | zstreamdump -v | sed 's/^/[FULL] /'
+  if [[ -n "$INCR_REAL" ]]; then
+    log "Previewing INCR stream…"
+    zstd -d -q -c -- "$INCR_REAL" | zstreamdump -v | sed 's/^/[INCR] /'
+  fi
+  ok "Preview complete."
+  exit 0
+fi
+
+# Collision checks & confirmations
+if (( OVERWRITE_ROOT )) && (( STAGED_MODE == 0 )); then
+  warn "You chose TRUE OVERWRITE of ${TARGET_POOL}. This will destroy existing datasets/snapshots."
+  if (( FORCE != 1 )); then read -r -p "Type 'OVERWRITE' to proceed: " ans; [[ "$ans" == "OVERWRITE" ]] || die "Aborted."; fi
+
+  warn "Destroying descendants under ${TARGET_POOL}…"
+  zfs destroy -r -f "${TARGET_POOL}" || true
+
+  warn "Destroying snapshots on root dataset ${TARGET_POOL} (if any)…"
+  zfs list -H -t snapshot -o name -r "${TARGET_POOL}" 2>/dev/null \
+    | awk -F@ -v root="${TARGET_POOL}" 'NF==2 && $1==root {print $0}' \
+    | while read -r snap; do zfs destroy -f -- "$snap" || true; log "Destroyed root snapshot: $snap"; done
+
+  ok "Existing hierarchy under ${TARGET_POOL} wiped."
+else
+  if dataset_exists "$RESTORE_ROOT"; then
+    die "Target dataset exists: ${RESTORE_ROOT}. Use --into <newname> or choose another name."
+  fi
+fi
+
+if (( FORCE != 1 )); then
+  read -r -p "Proceed with receive into ${RESTORE_ROOT}? (yes/no) " ans
+  [[ "$ans" == "yes" ]] || die "User aborted."
+fi
+
+# Apply FULL + INCR
+set -o pipefail
+
+log "Applying FULL → ${RESTORE_ROOT}"
+zstd -d -q -c -- "$FULL_PATH" \
+  | pv -petar \
+  | mbuffer -m "$MBUF_SIZE" -q \
+  | zfs receive ${RECEIVE_FLAGS} "${RECEIVE_PROPS[@]}" -- "$RESTORE_ROOT"
+ok "FULL applied."
+
+if [[ -n "$INCR_REAL" ]]; then
+  log "Applying INCR → ${RESTORE_ROOT}"
+  zstd -d -q -c -- "$INCR_REAL" \
+    | pv -petar \
+    | mbuffer -m "$MBUF_SIZE" -q \
+    | zfs receive ${RECEIVE_FLAGS} "${RECEIVE_PROPS[@]}" -- "$RESTORE_ROOT"
+  ok "INCR applied."
+else
+  warn "No incremental applied; dataset state is at FULL snapshot point-in-time."
+fi
+
+set +o pipefail
+
+# Mounting
+if (( DO_MOUNT )); then
+  if (( STAGED_MODE == 1 )); then
+    log "Enabling canmount=on and mounting staged subtree under redirected mountpoint."
+    zfs set canmount=on "$RESTORE_ROOT" || true
+    zfs list -H -o name -t filesystem -r -- "$RESTORE_ROOT" \
+      | while read -r fs; do zfs mount "$fs" || warn "Failed to mount $fs"; done
+    ok "Mounted staged restore at redirected mountpoint(s)."
+  elif (( OVERWRITE_ROOT )); then
+    log "Mounting all filesystems on ${TARGET_POOL} (overwrite-root)."
+    zfs mount -a || warn "Some filesystems may need manual mounting."
+    ok "Mount complete."
+  else
+    log "Mounting filesystems under ${RESTORE_ROOT}."
+    zfs list -H -o name -t filesystem -r -- "$RESTORE_ROOT" \
+      | while read -r fs; do zfs mount "$fs" || warn "Failed to mount $fs"; done
+    ok "Mount complete."
+  fi
+else
+  log "Skipping mount (no --mount)."
+fi
+
+ok "Restore complete."
+
+# Hints:
+# - If you restored in staged mode on a live system, later run (from a safe environment):
+#     zfs-disk-restore <POOL> --activate-staged --staged __staged-<ts> --yes --mount

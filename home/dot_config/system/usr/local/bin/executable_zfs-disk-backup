@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# vim: set ts=2 sw=2 et:
+set -Eeuo pipefail
+
+## zfs-disk-backup
+##
+## Host-local ZFS backup with safe, idempotent snapshots, pretty logs,
+## and a rolling window of cumulative incrementals.
+##
+## ───────────────────────────────────────────────────────────────────────────
+## WHAT IT PRODUCES (in DEST_DIR)
+##   • zfs-rpool.full.zst                    – Immutable FULL replication stream (first run only)
+##   • zfs-rpool.<YYYYmmdd-HHMMSS>.incr.zst  – Cumulative INCR from @BASE → that <ts> (created each run)
+##   • zfs-rpool.incr.zst                    – Symlink to the newest incremental
+##   • zfs-rpool.bundle.tar.zst (optional, BUNDLE=1) – single-file bundle (manifest + latest FULL/INCR)
+##
+## WHY “cumulative” INCR?
+##   Each incremental is a *single hop* from the fixed base to its timestamp.
+##   This makes restore trivial: apply FULL, then the chosen INCR (no long chains).
+##
+## RESTORE (examples)
+##   # Restore to FULL point-in-time:
+##   zstd -d -q -c /write-lock/zfs-rpool.full.zst \
+##     | mbuffer -m 1G -q | zfs receive -d -F <targetpool>
+##
+##   # Restore to a specific time (pick an INCR file by timestamp):
+##   zstd -d -q -c /write-lock/zfs-rpool.full.zst \
+##     | mbuffer -m 1G -q | zfs receive -d -F <targetpool> && \
+##   zstd -d -q -c /write-lock/zfs-rpool.20250830-013000.incr.zst \
+##     | mbuffer -m 1G -q | zfs receive -d -F <targetpool>
+##
+##   # Restore to the most recent time (symlink points to latest):
+##   zstd -d -q -c /write-lock/zfs-rpool.full.zst \
+##     | mbuffer -m 1G -q | zfs receive -d -F <targetpool> && \
+##   zstd -d -q -c /write-lock/zfs-rpool.incr.zst \
+##     | mbuffer -m 1G -q | zfs receive -d -F <targetpool>
+##
+## ───────────────────────────────────────────────────────────────────────────
+## VARIABLES (env-overridable)
+## ┌───────────────────────┬───────────────┬───────────────────────────┬──────────────────────────────────────────────────────┐
+## │ Name                  │ Default       │ Example                   │ Description                                          │
+## ├───────────────────────┼───────────────┼───────────────────────────┼──────────────────────────────────────────────────────┤
+## │ SRC_DATASET           │ rpool         │ rpool/data               │ Root dataset to back up (tree).                      │
+## │ DEST_DIR              │ /write-lock   │ /mnt/backup              │ Directory for artifacts + state.                     │
+## │ FULL                  │ zfs-rpool.full.zst                        │ FULL file name (under DEST_DIR).                     │
+## │ INCR_BASENAME         │ zfs-rpool     │ mypool-backup            │ Prefix for INCR files and symlink.                   │
+## │ KEEP_INCR             │ 14            │ 30                        │ How many INCR files to keep (newest N).              │
+## │ BUNDLE                │ 0             │ 1                         │ 1=emit bundle tar.zst; 0=skip.                       │
+## │ STATE_PATH            │ zfs-state.zst                             │ Plain-text state (LAST_SNAP=...).                    │
+## │ BASE_TAG              │ zdb-base      │                           │ Constant base tag ensured across tree.               │
+## │ ZSTD_LEVEL            │ 3             │ 5                         │ zstd level (perf-friendly default).                  │
+## │ ZSTD_THREADS          │ 2             │ 4                         │ zstd threads.                                        │
+## │ MBUF_SIZE             │ 1G            │ 2G                        │ mbuffer size.                                        │
+## │ LOG_FILE              │ /var/log/zfs-disk-backup.log              │ Log file.                                            │
+## │ RAW_SEND              │ 0             │ 1                         │ If 1, use raw replication (-w -R).                   │
+## │ DEBUG                 │ 0             │ 1                         │ If 1 (or --debug), enable shell trace.               │
+## └───────────────────────┴───────────────┴───────────────────────────┴──────────────────────────────────────────────────────┘
+##
+## USAGE
+##   sudo /usr/local/bin/zfs-disk-backup
+##   DEBUG=1 /usr/local/bin/zfs-disk-backup
+##   RAW_SEND=1 KEEP_INCR=14 BUNDLE=1 /usr/local/bin/zfs-disk-backup
+##
+## @command   zfs-disk-backup
+## @stdout    Styled logs to TTY; plain logs to file
+## @stderr    Errors with context
+## @exitcode  0 on success, >0 on error
+
+# ───────────────────────────────────────────────────────────────────────────
+# Configuration
+# ───────────────────────────────────────────────────────────────────────────
+SRC_DATASET="${SRC_DATASET:-rpool}"
+DEST_DIR="${DEST_DIR:-/write-lock}"
+
+FULL="${FULL:-zfs-rpool.full.zst}"
+INCR_BASENAME="${INCR_BASENAME:-zfs-rpool}"
+KEEP_INCR="${KEEP_INCR:-14}"
+
+BUNDLE="${BUNDLE:-0}"
+
+STATE_PATH="${STATE_PATH:-zfs-state.zst}"
+BASE_TAG="${BASE_TAG:-zdb-base}"
+
+ZSTD_LEVEL="${ZSTD_LEVEL:-3}"
+ZSTD_THREADS="${ZSTD_THREADS:-2}"
+MBUF_SIZE="${MBUF_SIZE:-1G}"
+LOG_FILE="${LOG_FILE:-/var/log/zfs-disk-backup.log}"
+RAW_SEND="${RAW_SEND:-0}"
+
+DEST_DIR="${DEST_DIR%/}"
+FULL_PATH="${DEST_DIR}/${FULL}"
+INCR_SYMLINK="${DEST_DIR}/${INCR_BASENAME}.incr.zst"
+BUNDLE_PATH="${DEST_DIR}/zfs-rpool.bundle.tar.zst"
+STATE_PATH="${DEST_DIR}/${STATE_PATH}"
+
+# Debug
+DEBUG_FLAG=0
+if [[ "${DEBUG:-0}" == "1" ]]; then DEBUG_FLAG=1; fi
+if [[ "${1:-}" == "--debug" ]]; then DEBUG_FLAG=1; shift; fi
+if (( DEBUG_FLAG )); then set -x; fi
+
+# Logging
+mkdir -p "$(dirname "$LOG_FILE")" || true
+touch "$LOG_FILE" 2>/dev/null || true
+_is_tty() { [[ -t 1 ]] && [[ -w /dev/tty ]]; }
+_ts() { date '+%F %T'; }
+if _is_tty; then CI="\033[1;36m"; CG="\033[1;32m"; CY="\033[1;33m"; CR="\033[1;31m"; CN="\033[0m"; else CI=""; CG=""; CY=""; CR=""; CN=""; fi
+_log_both() { local lvl="$1"; shift; local msg="$*"; local ts; ts="$(_ts)"; if _is_tty; then local color="$CI"; case "$lvl" in OK) color="$CG";; WARN) color="$CY";; ERR) color="$CR";; esac; printf "%b[%s]%b %s\n" "$color" "$ts" "$CN" "$msg" > /dev/tty; fi; printf "[%s] %s\n" "$ts" "$msg" >> "$LOG_FILE"; }
+log() { _log_both INFO "$*"; }
+ok() { _log_both OK "$*"; }
+warn() { _log_both WARN "$*"; }
+die() { _log_both ERR "ERROR: $*"; exit 1; }
+
+# Error handling
+__CLEANUP_FILES=()
+on_error() { local ec=$? ln=${BASH_LINENO[0]:-?}; warn "Error on or near line $ln (exit $ec). Cleaning up…"; for f in "${__CLEANUP_FILES[@]:-}"; do [[ -n "$f" ]] && rm -f -- "$f" || true; done; exit "$ec"; }
+trap on_error ERR INT TERM
+
+# Helpers
+need() { command -v "$1" >/dev/null 2>&1; }
+snap_exists() { zfs list -t snapshot -H -o name | grep -qx -- "$1"; }
+list_datasets_tree() { zfs list -H -o name -r -- "$1"; }
+ensure_tree_tag() { local root="$1" tag="$2" ds snap; while IFS= read -r ds; do snap="${ds}@${tag}"; if snap_exists "$snap"; then log "Snapshot exists: $snap"; else log "Creating snapshot: $snap"; if ! zfs snapshot -- "$snap"; then warn "Non-zero exit from 'zfs snapshot $snap' — continuing."; fi; fi; done < <(list_datasets_tree "$root"); }
+tag_exists_in_tree() { local root="$1" tag="$2"; zfs list -t snapshot -H -o name -r -- "$root" | awk -F@ 'NF==2{print $2}' | grep -qx -- "$tag"; }
+unique_latest_tag() { local root="$1" ts base try n=1; ts="$(date +%Y%m%d-%H%M%S)"; base="zdb-${ts}"; try="$base"; while tag_exists_in_tree "$root" "$try"; do try="${base}-${n}"; ((n++)); done; printf '%s\n' "$try"; }
+read_state() { LAST_SNAP=""; [[ -s "$STATE_PATH" ]] || return 0; . "$STATE_PATH" || true; }
+write_state() { printf 'LAST_SNAP="%s"\n' "${LAST_SNAP:-}" > "${STATE_PATH}.tmp"; mv -f -- "${STATE_PATH}.tmp" "$STATE_PATH"; }
+prune_old_incrementals() { local pattern="${DEST_DIR}/${INCR_BASENAME}."*.incr.zst; mapfile -t files < <(ls -1 ${pattern} 2>/dev/null | sort); local total=${#files[@]}; (( total <= KEEP_INCR )) && { log "INCR retention: have ${total}, keep ${KEEP_INCR} → nothing to prune."; return; }; local to_delete=$(( total - KEEP_INCR )); log "INCR retention: have ${total}, keep ${KEEP_INCR} → deleting ${to_delete} older file(s)."; local i; for (( i=0; i<to_delete; i++ )); do rm -f -- "${files[$i]}" && log "Deleted old INCR: ${files[$i]}"; done; }
+
+# Pre-flight
+log "=== zfs-disk-backup starting (PID $$) ==="
+log "SRC_DATASET=$SRC_DATASET DEST_DIR=$DEST_DIR"
+log "FULL=$FULL_PATH KEEP_INCR=$KEEP_INCR BUNDLE=$BUNDLE"
+[[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run as root"
+mkdir -p -- "$DEST_DIR" || die "Cannot create $DEST_DIR"
+touch -- "$STATE_PATH" || die "Cannot write $STATE_PATH"
+missing=(); for c in zfs pv mbuffer zstd tar; do need "$c" || missing+=("$c"); done
+if ((${#missing[@]})); then if need apt-get; then log "Installing deps via apt-get…"; export DEBIAN_FRONTEND=noninteractive; apt-get update -y; apt-get install -y --no-install-recommends zfsutils-linux pv mbuffer zstd tar; else die "Please install: zfs pv mbuffer zstd tar"; fi; else ok "All dependencies present."; fi
+zfs list -H -o name "$SRC_DATASET" >/dev/null 2>&1 || die "Dataset not found: $SRC_DATASET"
+read_state
+
+# Snapshots
+log "Ensuring BASE tag across tree: ${SRC_DATASET}@${BASE_TAG}"
+ensure_tree_tag "$SRC_DATASET" "$BASE_TAG"; BASE_SNAP="${SRC_DATASET}@${BASE_TAG}"
+LATEST_TAG="$(unique_latest_tag "$SRC_DATASET")"; log "Ensuring LATEST tag across tree: ${SRC_DATASET}@${LATEST_TAG}"
+ensure_tree_tag "$SRC_DATASET" "$LATEST_TAG"; LATEST_SNAP="${SRC_DATASET}@${LATEST_TAG}"
+
+SEND_FLAGS_FULL=(-c -L -R)
+SEND_FLAGS_INCR=(-c -L -R -I "$BASE_SNAP" "$LATEST_SNAP")
+[[ "$RAW_SEND" == "1" ]] && { SEND_FLAGS_FULL=(-w -R); SEND_FLAGS_INCR=(-w -R -I "$BASE_SNAP" "$LATEST_SNAP"); warn "RAW_SEND=1 → using raw replication streams."; }
+
+# Backup
+set -o pipefail
+if [[ ! -s "$FULL_PATH" ]]; then log "No FULL present → writing FULL: $FULL_PATH"; zfs send "${SEND_FLAGS_FULL[@]}" -- "$LATEST_SNAP" | pv -petar | mbuffer -m "$MBUF_SIZE" -q | zstd -"${ZSTD_LEVEL}" -T"${ZSTD_THREADS}" -q -f -o "$FULL_PATH"; ok "FULL written: $FULL_PATH"; else log "FULL already present → keeping existing: $FULL_PATH"; fi
+ts="$(date +%Y%m%d-%H%M%S)"; INCR_TS_PATH="${DEST_DIR}/${INCR_BASENAME}.${ts}.incr.zst"
+log "Writing INCR (cumulative): ${INCR_TS_PATH}  [${BASE_SNAP} → ${LATEST_SNAP}]"
+zfs send "${SEND_FLAGS_INCR[@]}" | pv -petar | mbuffer -m "$MBUF_SIZE" -q | zstd -"${ZSTD_LEVEL}" -T"${ZSTD_THREADS}" -q -f -o "$INCR_TS_PATH"; ok "INCR written: ${INCR_TS_PATH}"
+rm -f -- "$INCR_SYMLINK"; ln -s "$(basename -- "$INCR_TS_PATH")" "$INCR_SYMLINK"; ok "Updated symlink: $INCR_SYMLINK → $(readlink "$INCR_SYMLINK")"
+LAST_SNAP="$LATEST_SNAP"; write_state
+
+if [[ "$BUNDLE" == "1" ]]; then log "Building bundle: $BUNDLE_PATH"; tmpdir="$(mktemp -d "${DEST_DIR}/zdbundle.XXXXXX")"; __CLEANUP_FILES+=("$tmpdir"); { printf '{\n'; printf '  "host":"%s",\n' "$(hostname -s || echo host)"; printf '  "dataset":"%s",\n' "$SRC_DATASET"; printf '  "base_tag":"%s",\n' "$BASE_TAG"; printf '  "latest_tag":"%s",\n' "$LATEST_TAG"; printf '  "base_snapshot":"%s",\n' "$BASE_SNAP"; printf '  "latest_snapshot":"%s",\n' "$LATEST_SNAP"; printf '  "incremental_file":"%s",\n' "$(basename -- "$INCR_TS_PATH")"; printf '  "created_utc":"%s"\n' "$(date -u +%FT%TZ)"; printf '}\n'; } > "$tmpdir/manifest.json"; cp -f -- "$FULL_PATH" "$tmpdir/$(basename -- "$FULL_PATH")"; cp -f -- "$INCR_TS_PATH" "$tmpdir/$(basename -- "$INCR_TS_PATH")"; ( cd "$tmpdir"; tar -cf - manifest.json "$(basename -- "$FULL_PATH")" "$(basename -- "$INCR_TS_PATH")" | zstd -"${ZSTD_LEVEL}" -T"${ZSTD_THREADS}" -q -f -o "$BUNDLE_PATH" ); rm -rf -- "$tmpdir"; ok "Bundle written: $BUNDLE_PATH"; else log "BUNDLE=0 → skipping bundle creation."; fi
+prune_old_incrementals
+set +o pipefail
+
+# Epilogue
+show_sz() { local p="$1"; local s; s=$(stat -c%s "$p" 2>/dev/null || stat -f%z "$p" 2>/dev/null || echo 0); if command -v numfmt >/dev/null 2>&1; then numfmt --to=iec --suffix=B "$s"; else echo "${s} bytes"; fi; }
+ok "FULL size:   $(show_sz "$FULL_PATH")"
+ok "Latest INCR: $(basename -- "$INCR_TS_PATH") size: $(show_sz "$INCR_TS_PATH")"
+[[ -f "$BUNDLE_PATH" ]] && ok "BUNDLE size: $(show_sz "$BUNDLE_PATH")"
+ok "Backup complete."
+ok "Logs at: $LOG_FILE"

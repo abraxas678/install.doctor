@@ -54,6 +54,9 @@ require_cmd partprobe
 require_cmd udevadm
 command -v blkdiscard >/dev/null 2>&1 || warn "blkdiscard not found; TRIM step will be skipped."
 
+## FIX
+apt-get install -y parted
+
 # --- sanity checks ---
 [[ -b "$DEV" ]] || err "Device $DEV not found (is your Optane at a different path?)."
 

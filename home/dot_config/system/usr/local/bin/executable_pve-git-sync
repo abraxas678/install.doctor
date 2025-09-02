@@ -1,0 +1,531 @@
+#!/usr/bin/env bash
+# pve-git-sync — GitOps-style config backup for Proxmox VE
+# ==============================================================================
+# Environment Variables (can be exported or set inline when running/installing)
+#
+# ┌─────────────────────┬───────────────────────────────────────────────────────┐
+# │ Variable            │ Description                                           │
+# ├─────────────────────┼───────────────────────────────────────────────────────┤
+# │ PVE_GIT_REPO        │ Git SSH URL of the config repository.                 │
+# │                     │ Default: git@github.com:ProfessorManhattan/proxmox-   │
+# │                     │ configs.git                                           │
+# ├─────────────────────┼───────────────────────────────────────────────────────┤
+# │ WORK_TREE           │ Local checkout directory for the repo.                │
+# │                     │ Default: /usr/local/share/zfs-r2                      │
+# ├─────────────────────┼───────────────────────────────────────────────────────┤
+# │ HEALTHCHECK_URL     │ If set, ping ${HEALTHCHECK_URL}/start at run begin,   │
+# │                     │ then POST the full run log to ${HEALTHCHECK_URL} at   │
+# │                     │ successful end. On errors, POST log to                │
+# │                     │ ${HEALTHCHECK_URL}/fail.                              │
+# ├─────────────────────┼───────────────────────────────────────────────────────┤
+# │ GIT_SIGNING_KEY     │ Optional GPG key ID. If set, commits are signed (-S). │
+# ├─────────────────────┼───────────────────────────────────────────────────────┤
+# │ SYNC_PATHS          │ Optional array overriding default paths. Example:     │
+# │                     │   SYNC_PATHS=(/etc/pve /etc/network)                  │
+# │                     │ Defaults: see DEFAULT_SYNC_PATHS in script            │
+# └─────────────────────┴───────────────────────────────────────────────────────┘
+#
+# Features
+#   • Prompts once for repo if not configured; persists config in /etc/pve-git-sync.conf
+#   • Installs git/rsync/ssh/gh if missing
+#   • Authenticates with GitHub SSH (gh device/web flow + optional key upload)
+#   • Syncs text configs into host-specific subdir of repo
+#   • Ignores secrets by default (no private SSH keys, only pub/configs)
+#   • Seeds a Proxmox-focused .gitignore on first clone (VM disks, dumps, ISOs)
+#   • Runs every 15 minutes via systemd timer; logs to journald + /var/log/pve-git-sync.log
+#   • Offline-tolerant: commits locally; pushes when remote available
+#   • Healthchecks flow: /start at begin, full log POST at end (/fail on error)
+#   • Prefers aicommits/aic for commit messages; falls back to git commit
+#
+# Usage
+#   pve-git-sync install       # install service+timer
+#   pve-git-sync run           # one-off sync now (default)
+#   pve-git-sync status        # view systemd/logs
+#   pve-git-sync uninstall     # remove service+timer
+#
+# ==============================================================================
+
+set -Eeuo pipefail
+
+# ------------------------------- Constants -----------------------------------
+DEFAULT_REPO="git@github.com:ProfessorManhattan/proxmox-configs.git"
+CONF_FILE="/etc/pve-git-sync.conf"
+WORK_TREE_DEFAULT="/usr/local/share/zfs-r2"
+LOG_FILE="/var/log/pve-git-sync.log"
+SERVICE_NAME="pve-git-sync.service"
+TIMER_NAME="pve-git-sync.timer"
+SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
+TIMER_PATH="/etc/systemd/system/${TIMER_NAME}"
+SELF="${0}"
+LOCKFILE="/run/pve-git-sync.lock"
+
+# ------------------------------ Pretty logging -------------------------------
+RUN_LOG=""   # per-run temp log (used for healthchecks POST)
+
+log() { printf '[%s] %s\n' "$(date +'%F %T')" "$*"; }
+die() { log "ERROR: $*"; exit 1; }
+
+init_log() {
+  mkdir -p "$(dirname "$LOG_FILE")"
+  RUN_LOG="$(mktemp /run/pve-git-sync.XXXXXX.log)"
+  # tee to both the per-run log and the rolling file; journald captures stdout via systemd too
+  exec > >(tee -a "$RUN_LOG" "$LOG_FILE") 2>&1
+  log "==== pve-git-sync start pid=$$ ===="
+}
+
+cleanup_runlog() {
+  [[ -n "${RUN_LOG:-}" && -f "$RUN_LOG" ]] && rm -f "$RUN_LOG" || true
+}
+
+require_root() {
+  if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+    die "This script must be run as root."
+  fi
+}
+
+with_lock() {
+  exec {lockfd}>"$LOCKFILE" || die "Cannot open lock $LOCKFILE"
+  if ! flock -n "$lockfd"; then
+    log "Another pve-git-sync instance is running; exiting."
+    exit 0
+  fi
+}
+
+# ----------------------- Defaults (overridable via conf) ----------------------
+DEFAULT_SYNC_PATHS=(
+  "/etc/pve"
+  "/etc/network"
+  "/etc/ssh/config"
+  "/root/.ssh/config"
+  "/root/.ssh/*.pub"
+  "/etc/apt"
+  "/etc/fstab"
+  "/etc/hosts"
+  "/etc/resolv.conf"
+  "/etc/hostname"
+  "/etc/pve/firewall"
+  "/etc/corosync"
+  "/etc/ceph"
+  "/etc/chrony"
+  "/etc/systemd/timesyncd.conf"
+)
+
+REPO=""
+WORK_TREE=""
+HEALTHCHECK_URL=""
+GIT_SIGNING_KEY=""
+SYNC_PATHS=()
+
+load_config() {
+  REPO="${PVE_GIT_REPO:-$DEFAULT_REPO}"
+  WORK_TREE="${WORK_TREE_DEFAULT}"
+  SYNC_PATHS=("${DEFAULT_SYNC_PATHS[@]}")
+
+  if [[ -f "$CONF_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONF_FILE"
+  fi
+}
+
+save_config() {
+  umask 077
+  cat >"$CONF_FILE" <<EOF
+# pve-git-sync configuration
+REPO="${REPO}"
+WORK_TREE="${WORK_TREE}"
+HEALTHCHECK_URL="${HEALTHCHECK_URL}"
+GIT_SIGNING_KEY="${GIT_SIGNING_KEY}"
+# Example override for paths:
+# SYNC_PATHS=(/etc/pve /etc/network)
+EOF
+  chmod 0600 "$CONF_FILE"
+  log "Saved configuration to $CONF_FILE"
+}
+
+prompt_repo_if_needed() {
+  load_config
+  if [[ -n "${PVE_GIT_REPO:-}" ]]; then
+    REPO="$PVE_GIT_REPO"
+  fi
+  if [[ -z "${REPO:-}" ]]; then
+    REPO="$DEFAULT_REPO"
+  fi
+  if [[ ! -f "$CONF_FILE" ]]; then
+    read -r -p "Enter Git repository SSH URL [${REPO}]: " repo_input || true
+    REPO="${repo_input:-$REPO}"
+    save_config
+  else
+    save_config
+  fi
+}
+
+# ---------------------------- Dependencies -----------------------------------
+apt_install_if_missing() {
+  local pkgs=("$@") missing=()
+  for p in "${pkgs[@]}"; do
+    if ! dpkg -s "$p" &>/dev/null; then
+      missing+=("$p")
+    fi
+  done
+  if ((${#missing[@]})); then
+    log "Installing packages: ${missing[*]}"
+    apt-get update -y
+    # shellcheck disable=SC2086
+    apt-get install -y ${missing[*]}
+  fi
+}
+
+install_gh_cli_if_needed() {
+  if command -v gh &>/dev/null; then return; fi
+  log "Installing GitHub CLI (gh)…"
+  local codename; codename="$(. /etc/os-release; echo "${VERSION_CODENAME:-bookworm}")"
+  apt_install_if_missing curl ca-certificates gnupg lsb-release
+  install -d -m 0755 /etc/apt/keyrings
+  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages ${codename} main" \
+    >/etc/apt/sources.list.d/github-cli.list
+  apt-get update -y
+  apt_install_if_missing gh
+}
+
+# ----------------------------- GitHub auth -----------------------------------
+ensure_github_auth_ssh() {
+  local repo_url="$1"
+  if git ls-remote "$repo_url" &>/dev/null; then
+    log "SSH access to $repo_url confirmed."
+    return
+  fi
+
+  log "Cannot access $repo_url. Running GitHub auth…"
+  install -d -m 0700 /root/.ssh
+  if [[ ! -f /root/.ssh/id_ed25519 ]]; then
+    ssh-keygen -t ed25519 -C "$(whoami)@$(hostname)" -f /root/.ssh/id_ed25519 -N ""
+  fi
+
+  install_gh_cli_if_needed
+  gh auth login --git-protocol ssh || true
+  if [[ -f /root/.ssh/id_ed25519.pub ]]; then
+    gh ssh-key add /root/.ssh/id_ed25519.pub --title "host:$(hostname)" || true
+  fi
+
+  git ls-remote "$repo_url" &>/dev/null || die "Still cannot access $repo_url."
+}
+
+# ---------------------------- Repo bootstrap ---------------------------------
+detect_default_branch() {
+  git -C "$WORK_TREE" symbolic-ref --quiet --short HEAD 2>/dev/null \
+    || git -C "$WORK_TREE" remote show origin 2>/dev/null | awk '/HEAD branch/ {print $NF}' \
+    || echo "main"
+}
+
+seed_git_files_if_missing() {
+  # Seed a Proxmox-aware .gitignore and a sane .gitattributes on first clone
+  if [[ ! -f "$WORK_TREE/.gitignore" ]]; then
+    cat >"$WORK_TREE/.gitignore" <<'EOF'
+# ---- pve-git-sync default ignores (Proxmox-focused) -------------------------
+# Never commit private SSH keys
+/root/.ssh/id_*
+/root/.ssh/known_hosts.old
+
+# VM/CT disk images & dumps (keep repo lightweight and safe)
+/var/lib/vz/images/
+/var/lib/vz/snippets/
+/var/lib/vz/template/iso/
+/var/lib/vz/dump/
+/var/lib/vz/backup/
+*.qcow2
+*.qcow
+*.raw
+*.img
+*.vmdk
+*.vdi
+*.iso
+*.ova
+*.ovf
+*.zst
+*.xz
+*.gz
+*.bz2
+*.tar
+*.lzo
+
+# Proxmox Backup Server / PBS cache & chunks (if repo ever touches it)
+.cache/
+pbs-cache/
+pbs-chunks/
+
+# Logs and transient files
+*.log
+*.tmp
+*.swp
+*.swo
+*.bak
+*.old
+
+# Common build/system noise
+.DS_Store
+Thumbs.db
+
+# Ensure we keep only text configs by default; adjust as needed.
+EOF
+    (cd "$WORK_TREE" && git add .gitignore && git commit -m "chore: seed Proxmox-focused .gitignore" || true)
+  fi
+
+  if [[ ! -f "$WORK_TREE/.gitattributes" ]]; then
+    cat >"$WORK_TREE/.gitattributes" <<'EOF'
+* text=auto eol=lf
+*.conf diff
+*.json diff
+*.yaml diff
+*.yml diff
+*.service diff
+*.timer diff
+*.rules diff
+EOF
+    (cd "$WORK_TREE" && git add .gitattributes && git commit -m "chore: add baseline .gitattributes" || true)
+  fi
+}
+
+bootstrap_repo() {
+  install -d -m 0755 "$WORK_TREE"
+  if [[ ! -d "$WORK_TREE/.git" ]]; then
+    log "Cloning $REPO into $WORK_TREE"
+    git clone --depth=1 "$REPO" "$WORK_TREE"
+    seed_git_files_if_missing
+  else
+    log "Repo present at $WORK_TREE; pulling latest"
+    (cd "$WORK_TREE" && git fetch --all --prune && git pull --rebase --autostash) || die "git pull failed"
+    # Backfill .gitignore/.gitattributes if the repo didn't have them
+    seed_git_files_if_missing
+  fi
+
+  if [[ -n "${GIT_SIGNING_KEY:-}" ]]; then
+    git -C "$WORK_TREE" config user.signingkey "$GIT_SIGNING_KEY"
+    git -C "$WORK_TREE" config commit.gpgsign true
+  fi
+}
+
+_rsync_into_hostdir() {
+  # Robustly copy files/dirs (supports globs like *.pub). Missing paths are skipped.
+  local src="$1" rel dest
+  rel="$(echo "$src" | sed 's|^/||; s|/|-|g')"
+  dest="$2/$rel"
+
+  # Expand globs safely
+  shopt -s nullglob dotglob
+  local matches=()
+  # shellcheck disable=SC2207
+  matches=($(eval "printf '%q\n' $src"))
+  if ((${#matches[@]} == 0)); then
+    log "Skipping missing path: $src"
+    shopt -u nullglob dotglob
+    return
+  fi
+
+  for p in "${matches[@]}"; do
+    p="$(printf "%b" "$p")"  # unescape %q
+    if [[ -d "$p" ]]; then
+      install -d -m 0755 "$dest"
+      rsync -a --delete "$p"/ "$dest"/ || die "rsync failed for $p"
+    elif [[ -f "$p" ]]; then
+      install -d -m 0755 "$(dirname "$dest")"
+      rsync -a "$p" "$dest" || die "rsync failed for $p"
+    fi
+  done
+  shopt -u nullglob dotglob
+}
+
+# ---------------------------- Commit helper ----------------------------------
+commit_with_ai_or_fallback() {
+  # Must be run inside $WORK_TREE with staged changes present.
+  # 1) Prefer aicommits (or aic alias); pass -S if signing is configured.
+  # 2) If that fails or is absent, fall back to a deterministic message.
+  local sign_flag=""
+  [[ -n "${GIT_SIGNING_KEY:-}" ]] && sign_flag="-S"
+
+  if command -v aicommits &>/dev/null; then
+    log "Using aicommits to generate commit message…"
+    if aicommits ${sign_flag} ; then
+      return 0
+    else
+      log "aicommits failed; falling back to git commit."
+    fi
+  elif command -v aic &>/dev/null; then
+    log "Using aic (aicommits alias) to generate commit message…"
+    if aic ${sign_flag} ; then
+      return 0
+    else
+      log "aic failed; falling back to git commit."
+    fi
+  else
+    log "aicommits not installed; using git commit fallback."
+  fi
+
+  # Fallback conventional commit message
+  local ts; ts="$(date +'%F %T %z')"
+  git commit ${sign_flag} -m "chore(pve-git-sync): sync $(hostname) @ ${ts}"
+}
+
+perform_sync() {
+  bootstrap_repo
+
+  local hostdir="$WORK_TREE/host-$(hostname)"
+  install -d -m 0755 "$hostdir"
+
+  local paths=("${SYNC_PATHS[@]:-${DEFAULT_SYNC_PATHS[@]}}")
+  log "Syncing configuration set into $hostdir"
+  for p in "${paths[@]}"; do
+    _rsync_into_hostdir "$p" "$hostdir"
+  done
+
+  ( cd "$WORK_TREE"
+    git add .
+    if ! git diff --cached --quiet; then
+      commit_with_ai_or_fallback
+    else
+      log "No changes detected; nothing to commit."
+    fi
+  )
+
+  if git -C "$WORK_TREE" ls-remote "$REPO" &>/dev/null; then
+    local branch; branch="$(detect_default_branch)"
+    ( cd "$WORK_TREE" && git push origin "HEAD:${branch}" ) && log "Pushed to ${branch}."
+  else
+    log "Remote not reachable; commits remain local and will push next successful run."
+  fi
+}
+
+# ------------------------------ healthchecks ---------------------------------
+hc_start() {
+  [[ -n "${HEALTHCHECK_URL:-}" ]] || return 0
+  curl -fsS -m 10 --retry 3 "${HEALTHCHECK_URL%/}/start" >/dev/null || true
+}
+
+hc_finish_ok() {
+  [[ -n "${HEALTHCHECK_URL:-}" ]] || return 0
+  curl -fsS -m 10 --retry 3 --data-binary "@${RUN_LOG}" "${HEALTHCHECK_URL%/}" >/dev/null || true
+}
+
+hc_finish_fail() {
+  [[ -n "${HEALTHCHECK_URL:-}" ]] || return 0
+  curl -fsS -m 10 --retry 3 --data-binary "@${RUN_LOG}" "${HEALTHCHECK_URL%/}/fail" >/dev/null || true
+}
+
+# ------------------------------ systemd units --------------------------------
+install_systemd_units() {
+  cat >"$SERVICE_PATH" <<EOF
+[Unit]
+Description=Proxmox config Git sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${SELF} run
+User=root
+Group=root
+EnvironmentFile=-${CONF_FILE}
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat >"$TIMER_PATH" <<'EOF'
+[Unit]
+Description=Run pve-git-sync periodically
+
+[Timer]
+OnBootSec=5m
+OnUnitActiveSec=15m
+AccuracySec=1m
+RandomizedDelaySec=2m
+Unit=pve-git-sync.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now "$TIMER_NAME"
+  log "Installed and enabled $SERVICE_NAME + $TIMER_NAME"
+  log "Next runs: systemctl list-timers | grep pve-git-sync"
+}
+
+uninstall_systemd_units() {
+  systemctl disable --now "$TIMER_NAME" 2>/dev/null || true
+  systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
+  rm -f "$TIMER_PATH" "$SERVICE_PATH"
+  systemctl daemon-reload
+  log "Removed service and timer"
+}
+
+show_status() {
+  systemctl status "$SERVICE_NAME" --no-pager || true
+  echo "---- Recent logs (journalctl -u $SERVICE_NAME --since '1h') ----"
+  journalctl -u "$SERVICE_NAME" --since "1h" --no-pager || true
+  echo "---- Timer status ----"
+  systemctl list-timers --all | grep -E "$TIMER_NAME|NEXT|UNIT" -n --color=never || true
+}
+
+# ------------------------------- Entry points --------------------------------
+cmd_install() {
+  require_root; init_log; with_lock
+  load_config; hc_start
+  trap 'hc_finish_fail; cleanup_runlog' ERR
+  apt_install_if_missing git rsync openssh-client
+  install_gh_cli_if_needed
+  prompt_repo_if_needed
+  ensure_github_auth_ssh "$REPO"
+  bootstrap_repo
+  install_systemd_units
+  hc_finish_ok
+  cleanup_runlog
+  log "Install complete."
+}
+
+cmd_uninstall() {
+  require_root; init_log; with_lock
+  load_config; hc_start
+  trap 'hc_finish_fail; cleanup_runlog' ERR
+  uninstall_systemd_units
+  hc_finish_ok
+  cleanup_runlog
+  log "Uninstall complete."
+}
+
+cmd_run() {
+  require_root; init_log; with_lock
+  load_config; hc_start
+  trap 'hc_finish_fail; cleanup_runlog' ERR
+  apt_install_if_missing git rsync openssh-client
+  install_gh_cli_if_needed
+  perform_sync
+  hc_finish_ok
+  cleanup_runlog
+  log "Run complete."
+}
+
+cmd_status() {
+  require_root; init_log; with_lock
+  load_config; hc_start
+  trap 'hc_finish_fail; cleanup_runlog' ERR
+  show_status
+  hc_finish_ok
+  cleanup_runlog
+}
+
+main() {
+  case "${1:-run}" in
+    install)   cmd_install ;;
+    uninstall) cmd_uninstall ;;
+    status)    cmd_status ;;
+    run|"")    cmd_run ;;
+    *)         echo "Usage: $0 [install|uninstall|status|run]"; exit 2 ;;
+  esac
+}
+main "$@"

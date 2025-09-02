@@ -1,223 +1,273 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# restore-rpool-data.sh — Safe ZFS restore of *everything but the Proxmox OS*
+# restore-rpool-data.safe.sh — Safety-first ZFS restore for Proxmox (FULL + ALL INCR)
 #
-# Restores a ZFS backup (FULL + INCREMENTAL .zst streams) into a *temporary*
-# namespace under the existing 'rpool' (fresh Proxmox install), then replicates
-# all datasets EXCEPT 'rpool/ROOT/*' back to their canonical locations under
-# 'rpool', preserving snapshot history — without touching your clean boot/OS.
+# Goal:
+#   Restore *everything except the Proxmox OS* from a ZFS FULL + INCR chain,
+#   safely, with confirmations at every important step.
 #
-# Features
-# • Prompts or ENV inputs (FULL_ZST, INCR_ZST) with smart defaults:
-#     FULL_ZST defaults to ./rpool.full.zst
-#     INCR_ZST defaults to newest ./*.incr.zst if present (or blank to skip)
-# • Progress meters with pv (if installed), graceful fallback otherwise
-# • Idempotent-ish: receives into rpool/RESTORE, then replicates per-top dataset
-# • Preserves snapshot history (oldest → newest) when replicating to rpool/*
-# • Never overwrites rpool/ROOT (your fresh Proxmox OS/boot)
+# Strategy:
+#   1) Offer to export foreign pools (avoid conflicts)
+#   2) Receive FULL into rpool/RESTORE
+#   3) Auto-detect ALL incrementals in the current dir (*.incr.zst), sort, preflight,
+#      then apply in order into rpool/RESTORE
+#   4) Replicate top-level datasets (excluding rpool/RESTORE/ROOT/*) back to rpool/*
+#      with -R -I to preserve snapshots/history
 #
-# Usage
-#   FULL_ZST=/path/to/rpool.full.zst INCR_ZST=/path/to/20250831-175643.incr.zst \
-#     ./restore-rpool-data.sh
+# Will change:
+#   - Non-ROOT datasets under rpool (e.g., rpool/data, rpool/subvol-*, etc.)
+#   - Targets are received with -F (rollback/overwrite) — *after your confirmation*
 #
-# Or run with no env vars and use the interactive prompts.
+# Will NOT change:
+#   - rpool/ROOT/* (fresh Proxmox OS, kernels, initramfs, GRUB) — never touched
 #
-# Requirements
+# Inputs (env / prompts):
+#   - FULL_ZST   : path to full ZFS backup (.zst). Prompted if missing. Default: ./rpool.full.zst
+#   - INCR_GLOB  : shell glob to find incrementals (default: ./*.incr.zst)
+#
+# Requirements:
 #   - Run as root on the freshly installed Proxmox host
-#   - zfs, zpool, zstd installed (pv optional)
-#
-# Safety Notes
-#   - We *receive* into rpool/RESTORE first. Your fresh rpool/ROOT stays intact.
-#   - We then replicate all top-level children under rpool/RESTORE/* (except ROOT)
-#     back to rpool/*, using -R to include descendants & snapshots.
-#   - Existing targets under rpool/* will be force-received (-F). If they contain
-#     data you care about, back them up first.
-#
-# Design
-#   - Clear function boundaries, strict mode, traps, explicit checks
-#   - Avoids creating extra temporary pools/devices
-#   - Works even if you only have a single disk hosting 'rpool'
+#   - zfs, zpool, zstd installed (pv optional), zstreamdump (from zfs-dbg or zfsutils has it)
 # ==============================================================================
-
 set -Eeuo pipefail
 
-# ------------------------------ Config Defaults --------------------------------
-RESTORE_NS="rpool/RESTORE"   # Temporary receive namespace inside rpool
-POOL_NAME="rpool"            # The pool to restore *into* and final target
-PV_BIN="${PV_BIN:-pv}"       # Override if pv is elsewhere
+# ------------------------------ Config -----------------------------------------
+POOL_NAME="rpool"                 # Destination pool (fresh OS installed here)
+RESTORE_NS="${POOL_NAME}/RESTORE" # Temporary receive namespace (inside rpool)
+PV_BIN="${PV_BIN:-pv}"            # Optional progress (apt install pv)
+COLOR=1                           # Set 0 to disable ANSI colors
 
 # ------------------------------ UI Helpers -------------------------------------
-log()  { printf "\033[1;34m[%s]\033[0m %s\n" "INFO" "$*"; }
-warn() { printf "\033[1;33m[%s]\033[0m %s\n" "WARN" "$*"; }
-err()  { printf "\033[1;31m[%s]\033[0m %s\n" "ERR " "$*" >&2; }
+cblue()   { [[ $COLOR -eq 1 ]] && printf "\033[1;34m%s\033[0m" "$*" || printf "%s" "$*"; }
+cyellow() { [[ $COLOR -eq 1 ]] && printf "\033[1;33m%s\033[0m" "$*" || printf "%s" "$*"; }
+cred()    { [[ $COLOR -eq 1 ]] && printf "\033[1;31m%s\033[0m" "$*" || printf "%s" "$*"; }
+
+log()  { printf "%s %s\n" "$(cblue "[INFO]")"   "$*"; }
+warn() { printf "%s %s\n" "$(cyellow "[WARN]")" "$*"; }
+err()  { printf "%s %s\n" "$(cred "[ERR ]")"    "$*" >&2; }
 die()  { err "$*"; exit 1; }
 
-need_bin() {
-  command -v "$1" >/dev/null 2>&1 || die "Required binary not found: $1"
-}
+need_bin() { command -v "$1" >/dev/null 2>&1 || die "Missing required binary: $1"; }
 
 confirm() {
-  local prompt="${1:-Are you sure? [y/N]}"; local reply
+  local prompt="${1:-Proceed? [y/N]}"; local reply
   read -r -p "$prompt " reply || true
   [[ "${reply,,}" == "y" || "${reply,,}" == "yes" ]]
 }
 
+pause_enter() { read -r -p "Press ENTER to continue..." _ || true; }
+
+trap 'err "Aborted (exit code $?)."; exit 1' ERR
+
 # ------------------------------ Preconditions ----------------------------------
-trap 'err "Script aborted (exit code $?)."; exit 1' ERR
+[[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Please run as root."
 
 need_bin zfs
 need_bin zpool
 need_bin zstd
+if ! command -v zstreamdump >/dev/null 2>&1; then
+  warn "zstreamdump not found — preflight checks will be limited. (On Debian/Proxmox, it's in zfs-utils)"
+fi
 if ! command -v "$PV_BIN" >/dev/null 2>&1; then
-  warn "pv not found — progress bars will be limited. Install with: apt install pv"
+  warn "pv not found — progress bars limited. You can: apt install pv"
   PV_BIN=""
 fi
 
-# Ensure we're root
-[[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Please run as root."
+# Ensure destination pool exists and is imported
+zpool list -H -o name | grep -qx "$POOL_NAME" \
+  || die "ZFS pool '$POOL_NAME' is not imported. Install/import your fresh Proxmox ZFS root first."
+# Ensure OS dataset exists (we never touch this)
+zfs list -H -o name "${POOL_NAME}/ROOT" >/dev/null 2>&1 \
+  || die "Expected dataset '${POOL_NAME}/ROOT' missing. Are you on a fresh ZFS-root install?"
 
-# Ensure the target pool exists and is imported
-if ! zpool list -H -o name | grep -qx "$POOL_NAME"; then
-  die "ZFS pool '$POOL_NAME' is not imported. Import or install Proxmox with ZFS first."
+# ------------------------------ Optional Pool Export ---------------------------
+log "Checking for other imported pools (besides '${POOL_NAME}')..."
+OTHER_POOLS="$(zpool list -H -o name | grep -vx "$POOL_NAME" || true)"
+if [[ -n "$OTHER_POOLS" ]]; then
+  warn "Other imported pools detected:"
+  printf "  - %s\n" $OTHER_POOLS
+  if confirm "Export these pools now so they can be safely re-imported later? [y/N]"; then
+    for p in $OTHER_POOLS; do
+      log "Exporting pool: $p"
+      zpool export "$p"
+    done
+    log "Export complete. Re-import later with: zpool import <poolname>"
+  else
+    warn "Leaving other pools imported. If you hit GUID/name conflicts, export them and retry."
+  fi
+else
+  log "No other imported pools detected."
 fi
 
-# Ensure the fresh boot dataset exists (we won't touch it)
-if ! zfs list -H -o name "${POOL_NAME}/ROOT" >/dev/null 2>&1; then
-  die "Expected dataset '${POOL_NAME}/ROOT' missing. Are you on a fresh ZFS-root Proxmox?"
-fi
-
-# ------------------------------ Inputs & Defaults ------------------------------
-default_full="./rpool.full.zst"
-default_incr="$(ls -1t ./*.incr.zst 2>/dev/null | head -n1 || true)"
-
+# ------------------------------ Inputs -----------------------------------------
 FULL_ZST="${FULL_ZST:-}"
-INCR_ZST="${INCR_ZST:-}"
+INCR_GLOB="${INCR_GLOB:-./*.incr.zst}"
 
-prompt_file() {
-  local varname="$1" default="$2" label="$3"
-  local current="${!varname:-}"
-  if [[ -z "$current" ]]; then
-    local prompt="Path for ${label}"
+ask_file() {
+  local var="$1" default="$2" label="$3" val
+  val="${!var:-}"
+  if [[ -z "$val" ]]; then
+    local prompt="Path to ${label}"
     [[ -n "$default" ]] && prompt+=" [${default}]"
     prompt+=": "
-    read -r -p "$prompt" current || true
-    current="${current:-$default}"
-    printf -v "$varname" "%s" "$current"
+    read -r -p "$prompt" val || true
+    val="${val:-$default}"
+    printf -v "$var" "%s" "$val"
   fi
 }
 
-log "Collecting input…"
-prompt_file FULL_ZST "$default_full" "FULL backup (.zst) — e.g., rpool.full.zst"
-if [[ -z "$INCR_ZST" && -n "$default_incr" ]]; then
-  warn "Auto-detected newest incremental: $default_incr"
-fi
-prompt_file INCR_ZST "$default_incr" "INCREMENTAL backup (.zst) — e.g., 20250831-175643.incr.zst (leave blank to skip)"
-
+default_full="./rpool.full.zst"
+log "Collecting backup inputs…"
+ask_file FULL_ZST "$default_full" "FULL backup (.zst), e.g. rpool.full.zst"
 [[ -f "$FULL_ZST" ]] || die "FULL backup not found: $FULL_ZST"
-if [[ -n "$INCR_ZST" && ! -f "$INCR_ZST" ]]; then
-  die "Specified INCREMENTAL not found: $INCR_ZST"
+
+# Find incrementals by glob (if none, that's fine; we can restore FULL only)
+readarray -t INCR_FILES < <(ls -1 $INCR_GLOB 2>/dev/null | sort -V || true)
+if [[ ${#INCR_FILES[@]} -eq 0 ]]; then
+  warn "No incrementals matched glob: $INCR_GLOB"
+  if ! confirm "Continue with FULL only? [y/N]"; then
+    die "User aborted (no incrementals)."
+  fi
+else
+  log "Detected incrementals (in order):"
+  printf "  - %s\n" "${INCR_FILES[@]}"
+  if ! confirm "Apply ALL of the above incrementals in order after FULL? [y/N]"; then
+    die "User aborted incremental application."
+  fi
 fi
 
-log "Full  : $FULL_ZST"
-log "Incr  : ${INCR_ZST:-<none>}"
-log "Pool  : $POOL_NAME"
-log "Temp  : $RESTORE_NS"
+log "FULL : $FULL_ZST"
+[[ ${#INCR_FILES[@]} -gt 0 ]] && log "INCR : ${#INCR_FILES[@]} file(s) via '${INCR_GLOB}'"
+log "Pool : $POOL_NAME"
 
-# ------------------------------ Core Functions ---------------------------------
+if ! confirm "⚠️ This will receive into '${POOL_NAME}/RESTORE' then replicate back to '${POOL_NAME}/*' (excluding ROOT). Continue? [y/N]"; then
+  die "User aborted."
+fi
 
+# ------------------------------ Namespace Prep ---------------------------------
 ensure_namespace() {
   if zfs list -H -o name "$RESTORE_NS" >/dev/null 2>&1; then
-    warn "Namespace '$RESTORE_NS' already exists."
-    if confirm "OK to re-use and overwrite content within '$RESTORE_NS'? [y/N]"; then
-      return 0
+    warn "Namespace exists: '$RESTORE_NS'"
+    if confirm "DELETE existing namespace to do a clean receive? [y/N]"; then
+      warn "About to DESTROY '$RESTORE_NS' recursively!"
+      if confirm "FINAL CONFIRM — destroy '${RESTORE_NS}' and all descendants? [y/N]"; then
+        zfs destroy -r "$RESTORE_NS"
+        log "Destroyed old namespace."
+      else
+        die "User cancelled namespace destruction."
+      fi
     else
-      die "User aborted."
+      warn "Re-using existing namespace as-is."
     fi
-  else
-    log "Creating namespace '$RESTORE_NS'…"
+  fi
+
+  if ! zfs list -H -o name "$RESTORE_NS" >/dev/null 2>&1; then
+    log "Creating namespace: $RESTORE_NS"
     zfs create -p "$RESTORE_NS"
   fi
 }
 
-stream_into_namespace() {
-  local zst_file="$1"
-  local label="$2"  # FULL or INCR
+# ------------------------------ Stream Receive ---------------------------------
+receive_stream_into() {
+  local zst="$1" label="$2"
+  [[ -f "$zst" ]] || die "Missing stream: $zst"
+  log "Ready to receive ${label} into '${RESTORE_NS}'."
+  if ! confirm "Proceed receiving ${label}? This may overwrite existing datasets under '${RESTORE_NS}'. [y/N]"; then
+    die "User aborted ${label} receive."
+  fi
 
-  log "Receiving $label stream into '$RESTORE_NS'…"
-  # We receive at the namespace root; ZFS will create children accordingly.
-  # Use pv if available for progress.
   if [[ -n "$PV_BIN" ]]; then
-    # Try to estimate size for pv: falls back if du fails (e.g., remote fs)
-    local size_bytes
-    size_bytes="$(du -b "$zst_file" 2>/dev/null | awk '{print $1}')" || size_bytes=""
-    if [[ -n "$size_bytes" ]]; then
-      zstd -dc -- "$zst_file" | "$PV_BIN" -s "$size_bytes" | zfs recv -F "$RESTORE_NS"
+    local size; size="$(du -b -- "$zst" 2>/dev/null | awk '{print $1}')" || size=""
+    if [[ -n "$size" ]]; then
+      zstd -dc -- "$zst" | "$PV_BIN" -s "$size" | zfs recv -F "$RESTORE_NS"
     else
-      zstd -dc -- "$zst_file" | "$PV_BIN" | zfs recv -F "$RESTORE_NS"
+      zstd -dc -- "$zst" | "$PV_BIN" | zfs recv -F "$RESTORE_NS"
     fi
   else
-    zstd -dc -- "$zst_file" | zfs recv -F "$RESTORE_NS"
+    zstd -dc -- "$zst" | zfs recv -F "$RESTORE_NS"
+  fi
+  log "${label} receive complete."
+}
+
+# Extract the required fromsnap name from an incremental (best-effort)
+incr_required_fromsnap() {
+  local zst="$1"
+  if command -v zstreamdump >/dev/null 2>&1; then
+    zstd -dc -- "$zst" | zstreamdump -v \
+      | awk '/fromsnap = /{print $3; exit}'
+  else
+    # No zstreamdump — cannot preflight; return empty
+    echo ""
   fi
 }
 
-# Return a space-separated list of top-level children under RESTORE_NS, excluding ROOT
-list_toplevel_children() {
+# Verify that a snapshot with @fromsnap exists somewhere under RESTORE_NS
+preflight_incr_has_base() {
+  local zst="$1" fromsnap="$2"
+  [[ -z "$fromsnap" ]] && return 0  # cannot check; let recv handle
+  if zfs list -t snapshot -r "$RESTORE_NS" -H -o name | grep -q "@${fromsnap}\$"; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# ------------------------------ Dataset Listing --------------------------------
+list_children_excluding_root() {
   zfs list -H -o name "$RESTORE_NS"/* 2>/dev/null | grep -vE "^${RESTORE_NS}/ROOT($|/)" || true
 }
 
-# For a dataset, find oldest and newest snapshots (names without pool prefix)
-# Prints: "<oldest>@snap  <newest>@snap" (full names)
-dataset_oldest_newest_snaps() {
+dataset_snaps_oldest_newest() {
   local ds="$1"
-  # List snapshots under this dataset (recursive) but we want *this dataset's* own snapshots
   local snaps
-  snaps="$(zfs list -H -t snapshot -o name -S creation -r "$ds" | awk -F@ -v pfx="$ds" '$1==pfx{print $0}')" || true
+  snaps="$(zfs list -H -t snapshot -o name -S creation -r "$ds" | awk -F@ -v p="$ds" '$1==p{print $0}')" || true
   [[ -n "$snaps" ]] || return 1
   local newest oldest
   newest="$(echo "$snaps" | head -n1)"
   oldest="$(echo "$snaps" | tail -n1)"
-  # Note: -S creation sorts newest first, hence tail=oldest
   printf "%s %s\n" "$oldest" "$newest"
 }
 
-replicate_dataset_to_rpool() {
-  local src="$1"                          # e.g., rpool/RESTORE/data
-  local rel="${src#${RESTORE_NS}/}"       # e.g., data
-  local dst="${POOL_NAME}/${rel}"         # e.g., rpool/data
+replicate_one_dataset() {
+  local src="$1" rel="${src#${RESTORE_NS}/}" dst="${POOL_NAME}/${rel}"
 
-  log "Preparing to replicate: $src  →  $dst"
+  log "Planning: $src  →  $dst"
 
-  # Ensure target parent exists
-  local parent
-  parent="$(dirname "$dst")"
+  if zfs list -H -o name "$dst" >/dev/null 2>&1; then
+    warn "Target exists: $dst"
+    if ! confirm "Allow overwrite/rollback of '$dst' via 'zfs recv -F'? [y/N]"; then
+      warn "Skipping $dst by user choice."
+      return 0
+    fi
+  fi
+
+  local parent; parent="$(dirname "$dst")"
   if ! zfs list -H -o name "$parent" >/dev/null 2>&1; then
     log "Creating parent dataset: $parent"
     zfs create -p "$parent"
   fi
 
-  # Find oldest/newest snapshots on the *source* dataset
-  local line
-  if ! line="$(dataset_oldest_newest_snaps "$src")"; then
-    warn "No snapshots found for $src — creating a temporary snapshot to send current state."
-    local ts
-    ts="$(date +%Y%m%d-%H%M%S)"
+  local range; range="$(dataset_snaps_oldest_newest "$src" || true)"
+  if [[ -z "$range" ]]; then
+    warn "No snapshots on $src. Creating temporary snapshot of current state."
+    local ts; ts="$(date +%Y%m%d-%H%M%S)"
     zfs snapshot "$src@_restore_tmp_${ts}"
-    line="$(dataset_oldest_newest_snaps "$src")" || die "Unable to snapshot $src"
+    range="$(dataset_snaps_oldest_newest "$src")" || die "Failed to snapshot $src"
   fi
-
   local oldest newest
-  oldest="$(awk '{print $1}' <<<"$line")"
-  newest="$(awk '{print $2}' <<<"$line")"
+  oldest="$(awk '{print $1}' <<<"$range")"
+  newest="$(awk '{print $2}' <<<"$range")"
 
-  log "Replicating snapshots (history preserved):"
+  log "Will replicate with history:"
   log "  Oldest: $oldest"
   log "  Newest: $newest"
 
-  # Perform full-history replication (-R includes descendants; -I oldest newest sends incrementals)
-  # Use pv for visibility if possible.
+  if ! confirm "Proceed with replication of '$src' to '$dst'? [y/N]"; then
+    warn "Skipped by user."
+    return 0
+  fi
+
   if [[ -n "$PV_BIN" ]]; then
-    # We can't know send size easily; use pv in line mode for feedback.
-    # zfs send outputs a stream; we just interpose pv for a visual indicator.
     zfs send -R -I "$oldest" "$newest" | "$PV_BIN" | zfs recv -F "$dst"
   else
     zfs send -R -I "$oldest" "$newest" | zfs recv -F "$dst"
@@ -226,45 +276,104 @@ replicate_dataset_to_rpool() {
   log "Replication complete: $dst"
 }
 
-# ------------------------------ Execution Flow ---------------------------------
-
-log "Step 1/4: Ensuring temporary namespace exists…"
+# ------------------------------ Execution --------------------------------------
+log "Step 1/7 — Prepare restore namespace"
 ensure_namespace
+pause_enter
 
-log "Step 2/4: Receiving FULL stream to namespace…"
-stream_into_namespace "$FULL_ZST" "FULL"
+log "Step 2/7 — Receive FULL stream"
+receive_stream_into "$FULL_ZST" "FULL"
+pause_enter
 
-if [[ -n "$INCR_ZST" ]]; then
-  log "Step 3/4: Applying INCREMENTAL stream to namespace…"
-  stream_into_namespace "$INCR_ZST" "INCREMENTAL"
+log "Step 3/7 — Apply ALL incrementals (if any)"
+if [[ ${#INCR_FILES[@]} -gt 0 ]]; then
+  for incr in "${INCR_FILES[@]}"; do
+    [[ -f "$incr" ]] || die "Incremental missing: $incr"
+    local_from="$(incr_required_fromsnap "$incr" || true)"
+    if [[ -n "$local_from" ]]; then
+      log "Preflight: '$incr' requires base snapshot '@${local_from}' under '${RESTORE_NS}'."
+      if preflight_incr_has_base "$incr" "$local_from"; then
+        log "  ✓ Base snapshot '@${local_from}' found under RESTORE."
+      else
+        err "  ✗ Base snapshot '@${local_from}' NOT found under RESTORE. Cannot apply '$incr'."
+        err "    → Ensure you've applied all earlier incrementals, or that your FULL contains this base snapshot."
+        exit 1
+      fi
+    else
+      warn "Skipping preflight for '$incr' (zstreamdump not available or fromsnap not detectable)."
+    fi
+    receive_stream_into "$incr" "INCREMENTAL ($(basename "$incr"))"
+  done
 else
-  log "Step 3/4: No incremental provided — proceeding with FULL only."
+  warn "No incrementals detected — proceeding with FULL only."
 fi
+pause_enter
 
-log "Enumerating top-level datasets under ${RESTORE_NS} (excluding ROOT)…"
-children="$(list_toplevel_children)"
-if [[ -z "$children" ]]; then
-  die "No top-level datasets found under ${RESTORE_NS} to replicate. Check your streams."
-fi
+log "Step 4/7 — Enumerate candidate datasets under ${RESTORE_NS} (excluding ROOT)"
+children="$(list_children_excluding_root)"
+[[ -n "$children" ]] || die "No datasets found under ${RESTORE_NS}. Check streams."
 
-log "The following datasets will be replicated back into '${POOL_NAME}':"
+printf "%s\n" "These top-level datasets are candidates for replication:"
 printf "  - %s\n" $children
+echo
 
-if ! confirm "Proceed with replication? This will overwrite existing targets with 'zfs recv -F'. [y/N]"; then
+ONLY_VM_LXC=0
+if confirm "Replicate ONLY VM/LXC data ('${RESTORE_NS}/data' and '${RESTORE_NS}/subvol-*')? [y/N]"; then
+  ONLY_VM_LXC=1
+fi
+
+if [[ $ONLY_VM_LXC -eq 1 ]]; then
+  filtered=""
+  for ds in $children; do
+    if [[ "$ds" == "${RESTORE_NS}/data" || "$ds" == ${RESTORE_NS}/subvol-* ]]; then
+      filtered+="$ds"$'\n'
+    fi
+  done
+  children="$(echo "$filtered" | sed '/^$/d' || true)"
+  [[ -n "$children" ]] || die "No VM/LXC datasets matched. Aborting."
+  warn "Filtered list:"
+  printf "  - %s\n" $children
+fi
+
+if ! confirm "Proceed to replicate the above list into '${POOL_NAME}'? [y/N]"; then
   die "User aborted before replication."
 fi
 
-log "Step 4/4: Replicating datasets (preserving snapshot history)…"
-for ds in $children; do
-  # Safety check: never touch ROOT
-  [[ "$ds" == "${RESTORE_NS}/ROOT"* ]] && continue
-  replicate_dataset_to_rpool "$ds"
-done
+PER_DATASET_CONFIRM=0
+if confirm "Ask for confirmation PER dataset? [y/N]"; then
+  PER_DATASET_CONFIRM=1
+fi
 
-log "All datasets replicated. Your fresh '${POOL_NAME}/ROOT' was not touched."
-log "Next steps:"
-printf -- "  • In Proxmox UI → Datacenter → Storage → ensure 'local-zfs' (or your ZFS storage) points to '%s'.\n" "$POOL_NAME"
-echo   "  • Recreate or restore VM configs under /etc/pve/qemu-server/*.conf to reference disks like:"
-echo   "      scsi0: local-zfs:vm-101-disk-0,size=XXG"
-echo   "  • Start VMs with: qm start <VMID>"
-log "Done ✅"
+log "Step 5/7 — Replication"
+for ds in $children; do
+  [[ "$ds" == "${RESTORE_NS}/ROOT" || "$ds" == "${RESTORE_NS}/ROOT/"* ]] && continue
+  if [[ $PER_DATASET_CONFIRM -eq 1 ]]; then
+    if ! confirm "Replicate '$ds'? [y/N]"; then
+      warn "Skipping '$ds' per user choice."
+      continue
+    fi
+  fi
+  replicate_one_dataset "$ds"
+  echo
+done
+pause_enter
+
+log "Step 6/7 — Post-restore options"
+if confirm "Delete the temporary namespace '${RESTORE_NS}' now? [y/N]"; then
+  warn "This will destroy '${RESTORE_NS}' recursively."
+  if confirm "FINAL CONFIRM — Destroy '${RESTORE_NS}'? [y/N]"; then
+    zfs destroy -r "$RESTORE_NS"
+    log "Removed restore namespace."
+  else
+    warn "Kept restore namespace."
+  fi
+else
+  warn "Keeping restore namespace for inspection."
+fi
+
+log "Step 7/7 — Wrap-up"
+log "✅ Done. Your fresh '${POOL_NAME}/ROOT' was preserved."
+echo "Next steps:"
+echo "  • Proxmox UI → Datacenter → Storage: ensure ZFS storage points at '${POOL_NAME}'."
+echo "  • Restore or recreate VM configs in /etc/pve/qemu-server/*.conf (e.g.: scsi0: local-zfs:vm-101-disk-0,size=XXG)."
+echo "  • Start VMs: qm start <VMID>"

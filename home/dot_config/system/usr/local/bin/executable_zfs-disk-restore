@@ -1,414 +1,574 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash
+# ==============================================================================
+# restore-rpool-data.safe.sh — Safety-first ZFS restore for Proxmox (FULL + ALL INCR)
+#
+# Purpose:
+#   Restore *VM/LXC data only* from a ZFS FULL + INCREMENTAL backup chain into a
+#   freshly installed Proxmox system on ZFS, while keeping the host OS (rpool/ROOT/*)
+#   pristine. Interactive, cautious, and resume-friendly.
+#
+# Key Features:
+#   - Receives FULL + INCR streams into rpool/RESTORE with:
+#       * -d (re-root under rpool/RESTORE)
+#       * -u (do not auto-mount during receive)
+#       * -x mountpoint (avoid mountpoint churn) — benign zvol warnings filtered
+#   - Preflight checks: parse each INCR via `zstreamdump` to ensure `fromsnap`
+#     exists in rpool/RESTORE before receiving (prevents cryptic failures).
+#   - Replicates **only** VM/LXC datasets back into rpool with full snapshot history:
+#       * Includes: rpool/RESTORE/data (and descendants), rpool/RESTORE/subvol-*
+#       * Excludes: rpool/RESTORE/ROOT/* (OS) by design.
+#   - **Optional Step 7b**: Copy **var-lib-vz** artifacts (ISOs/templates/backups/images)
+#     with a file-type filter. Mounts datasets on demand.
+#   - Strong confirmations on destructive steps; optional per-dataset confirm.
+#   - Resume support:
+#       * RESUME_FROM=4+ to jump straight to sanity-check/replication steps.
+#       * AUTO_RESUME=1 auto-skips to step 4 if RESTORE already has children.
+#   - Progress bars if `pv` is installed.
+#   - Generalized parent/target creation (Step 6) — now optional because Step 7 mapping works.
+#
+# Inputs (env/prompts):
+#   FULL_ZST     Path to FULL stream (default prompt: /var/lib/vz/dump/rpool.full.zst)
+#   INCR_GLOB    Glob for incremental streams (default: /var/lib/vz/dump/*.incr.zst)
+#   RESUME_FROM  1..8 — start at a specific step (e.g. 6)
+#   AUTO_RESUME  If "1", auto-skip to step 4 when RESTORE already populated
+#
+# Requirements:
+#   - Run as root on Proxmox with ZFS root installed and rpool imported
+#   - zfs, zpool, zstd installed; zstreamdump recommended; pv optional; rsync optional
+#
+# Safety:
+#   - Never touches rpool/ROOT/* (your fresh OS, kernels, GRUB remain intact)
+#   - Works inside rpool/RESTORE first, then replicates to rpool/*
+# ==============================================================================
+
 set -Eeuo pipefail
 
-## zfs-disk-restore
-##
-## Restore artifacts created by `zfs-disk-backup`:
-##   1) Apply FULL replication stream (zfs-rpool.full.zst)
-##   2) Apply a cumulative INCR stream (latest symlink or chosen)
-##
-## Extras:
-##   • Auto-mounts a device labeled WRITELOCK at /write-lock if needed
-##     (or bind-mounts if it’s mounted elsewhere).
-##   • --overwrite-root: true overwrite if pool idle; otherwise auto-staged restore.
-##   • --activate-staged: promote a staged restore to canonical ROOT (no receive).
-##   • --mount: mount restored datasets (overwrite = all; staged = subtree).
-##
-## Typical live-ISO flow:
-##   sudo zpool import -N rpool
-##   # (plug in your USB; script will auto-mount LABEL=WRITELOCK to /write-lock)
-##   sudo zfs-disk-restore rpool --overwrite-root --yes --mount
-##
-## Usage (restore):
-##   sudo zfs-disk-restore <POOL> [--ts YYYYmmdd-HHMMSS | --incr-file /path/incr.zst]
-##                         [--into NAME] [--overwrite-root] [--mount]
-##                         [--preview] [--yes|-y] [--debug]
-##
-## Usage (activate staged → ROOT):
-##   sudo zfs-disk-restore <POOL> --activate-staged [--staged __staged-<ts>] [--mount] [--yes|-y]
-##
-## SAFETY
-##   - You cannot overwrite the pool you’re booted from; script stages instead.
-##   - Activation requires the target pool to be idle (booted from elsewhere).
+# ------------------------------ Configuration ----------------------------------
+POOL_NAME="rpool"                   # Destination pool on this host
+RESTORE_NS="${POOL_NAME}/RESTORE"   # Temporary receive namespace
+PV_BIN="${PV_BIN:-pv}"              # Progress utility (optional)
+COLOR=1                             # 1=colored logs, 0=plain
 
-# ------------------------------ Config ---------------------------------
-DEST_DIR="${DEST_DIR:-/write-lock}"
-FULL="${FULL:-zfs-rpool.full.zst}"
-INCR_BASENAME="${INCR_BASENAME:-zfs-rpool}"
-RECEIVE_FLAGS="${RECEIVE_FLAGS:--d -F -u}"
-ZSTD_THREADS="${ZSTD_THREADS:-2}"
-MBUF_SIZE="${MBUF_SIZE:-1G}"
-LOG_FILE="${LOG_FILE:-/var/log/zfs-disk-restore.log}"
-FORCE="${FORCE:-0}"
+# Inclusion/exclusion for replication (top-level under RESTORE)
+INCLUDE_TOPLEVEL_REGEX="^(${RESTORE_NS}/data($|/)|${RESTORE_NS}/subvol-[^/]+$)"
+EXCLUDE_TOPLEVEL_REGEX="^(${RESTORE_NS}/ROOT($|/))"
 
-DEST_DIR="${DEST_DIR%/}"
-FULL_PATH="${DEST_DIR}/${FULL}"
-INCR_SYMLINK="${DEST_DIR}/${INCR_BASENAME}.incr.zst"
+# File patterns allowed for var-lib-vz artifact copy (Step 7b)
+VZ_INCLUDE_EXT_REGEX='\.(iso|img|qcow2|vma(\.gz|\.zst)?|vzdump.*\.(tgz|tar|tar\.gz|tar\.zst)|vzt|tmpl)$'
 
-# ------------------------------ CLI ------------------------------------
-DEBUG_FLAG=0
-TARGET_POOL=""
-SELECT_TS=""
-EXPLICIT_INCR=""
-PREVIEW=0
-OVERWRITE_ROOT=0
-INTO_NAME=""
-DO_MOUNT=0
+# ------------------------------ UI / Logging -----------------------------------
+cblue()   { [[ $COLOR -eq 1 ]] && printf "\033[1;34m%s\033[0m" "$*" || printf "%s" "$*"; }
+cyellow() { [[ $COLOR -eq 1 ]] && printf "\033[1;33m%s\033[0m" "$*" || printf "%s" "$*"; }
+cred()    { [[ $COLOR -eq 1 ]] && printf "\033[1;31m%s\033[0m" "$*" || printf "%s" "$*"; }
+log()     { printf "%s %s\n" "$(cblue "[INFO]")"   "$*"; }
+warn()    { printf "%s %s\n" "$(cyellow "[WARN]")" "$*"; }
+err()     { printf "%s %s\n" "$(cred "[ERR ]")"    "$*" >&2; }
+die()     { err "$*"; exit 1; }
+need_bin(){ command -v "$1" >/dev/null 2>&1 || die "Missing required binary: $1"; }
+confirm() { local p="${1:-Proceed? [y/N]}"; local r; read -r -p "$p " r || true; [[ "${r,,}" == y || "${r,,}" == yes ]]; }
+pause_enter(){ read -r -p "Press ENTER to continue..." _ || true; }
 
-# Activation mode
-ACTIVATE_STAGED=0
-STAGED_NAME=""     # e.g. __staged-20250830-012233
+# Safe env var get/set (avoids `${!name:-}` which is invalid with nounset)
+get_var() { local name="$1"; eval "printf '%s' \"\${$name-}\""; }
+set_var() { local name="$1" value="$2"; printf -v "$name" "%s" "$value"; }
 
-usage() {
-  cat <<EOF
-Usage:
-  Restore FULL+INCR:
-    $0 <TARGET_POOL> [--ts YYYYmmdd-HHMMSS | --incr-file /path/incr.zst]
-                     [--into NAME] [--overwrite-root] [--mount]
-                     [--preview] [--yes|-y] [--debug]
+trap 'err "Aborted (exit code $?)"; exit 1' ERR
 
-  Activate a staged restore (no receive):
-    $0 <TARGET_POOL> --activate-staged [--staged __staged-<ts>] [--mount] [--yes|-y] [--debug]
+# ------------------------------ Preconditions ----------------------------------
+[[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Please run as root."
+need_bin zfs; need_bin zpool; need_bin zstd
+if ! command -v zstreamdump >/dev/null 2>&1; then warn "zstreamdump not found — incremental preflight limited."; fi
+if ! command -v "$PV_BIN" >/dev/null 2>&1; then warn "pv not found — progress bars limited. apt install pv"; PV_BIN=""; fi
+zpool list -H -o name | grep -qx "$POOL_NAME" || die "ZFS pool '$POOL_NAME' not imported."
+zfs list -H -o name "${POOL_NAME}/ROOT" >/dev/null 2>&1 || die "Missing '${POOL_NAME}/ROOT' — ensure ZFS-root install."
 
-Options:
-  --ts <YYYYmmdd-HHMMSS>       Use a specific timestamped incremental.
-  --incr-file <path.incr.zst>  Use an explicit incremental file path.
-  --into <name>                Restore under POOL/<name> (default: restore-<ts> if not overwriting).
-  --overwrite-root             If pool idle: wipe and restore under POOL (dangerous).
-                               If pool busy: auto-stage under POOL/__staged-<ts>.
-  --mount                      Mount datasets after success.
-  --preview                    Only dump stream structure (no changes).
-  --activate-staged            Promote a staged tree (no receive). Use with --staged or auto-detect newest.
-  --staged <__staged-...>      Which staged subtree to activate; default: newest __staged-* under POOL.
-  --yes | -y                   Skip confirmations.
-  --debug                      Shell trace.
-  -h | --help                  This help.
-
-Environment:
-  DEST_DIR, FULL, INCR_BASENAME, RECEIVE_FLAGS, ZSTD_THREADS, MBUF_SIZE, LOG_FILE
-EOF
-}
-
-while (( $# )); do
-  case "$1" in
-    --debug) DEBUG_FLAG=1 ;;
-    --yes|-y) FORCE=1 ;;
-    --ts) shift; SELECT_TS="${1:-}"; [[ -z "$SELECT_TS" ]] && { echo "Missing value for --ts"; exit 2; } ;;
-    --incr-file) shift; EXPLICIT_INCR="${1:-}"; [[ -z "$EXPLICIT_INCR" ]] && { echo "Missing value for --incr-file"; exit 2; } ;;
-    --preview) PREVIEW=1 ;;
-    --overwrite-root) OVERWRITE_ROOT=1 ;;
-    --into) shift; INTO_NAME="${1:-}"; [[ -z "$INTO_NAME" ]] && { echo "Missing value for --into"; exit 2; } ;;
-    --mount) DO_MOUNT=1 ;;
-    --activate-staged) ACTIVATE_STAGED=1 ;;
-    --staged) shift; STAGED_NAME="${1:-}"; [[ -z "$STAGED_NAME" ]] && { echo "Missing value for --staged"; exit 2; } ;;
-    -h|--help) usage; exit 0 ;;
-    -*)
-      echo "Unknown option: $1"; usage; exit 2 ;;
-    *)
-      if [[ -z "$TARGET_POOL" ]]; then TARGET_POOL="$1"; else echo "Unexpected argument: $1"; usage; exit 2; fi
-      ;;
-  esac
-  shift
-done
-
-(( DEBUG_FLAG )) && set -x
-[[ -n "$TARGET_POOL" ]] || { usage; exit 2; }
-
-# --------------------------- Styled logging ----------------------------
-mkdir -p "$(dirname "$LOG_FILE")" || true
-touch "$LOG_FILE" 2>/dev/null || true
-_is_tty() { [[ -t 1 ]] && [[ -w /dev/tty ]]; }
-ts() { date '+%F %T'; }
-if _is_tty; then CI="\033[1;36m"; CG="\033[1;32m"; CY="\033[1;33m"; CR="\033[1;31m"; CN="\033[0m"; else CI=""; CG=""; CY=""; CR=""; CN=""; fi
-log()  { local m="$*"; printf "[%s] %s\n" "$(ts)" "$m" >> "$LOG_FILE"; _is_tty && printf "%b[%s]%b %s\n" "$CI" "$(ts)" "$CN" "$m" > /dev/tty; }
-ok()   { local m="$*"; printf "[%s] %s\n" "$(ts)" "$m" >> "$LOG_FILE"; _is_tty && printf "%b[%s]%b %s\n" "$CG" "$(ts)" "$CN" "$m" > /dev/tty; }
-warn() { local m="$*"; printf "[%s] %s\n" "$(ts)" "$m" >> "$LOG_FILE"; _is_tty && printf "%b[%s]%b %s\n" "$CY" "$(ts)" "$CN" "$m" > /dev/tty; }
-die()  { local m="ERROR: $*"; printf "[%s] %s\n" "$(ts)" "$m" >> "$LOG_FILE"; _is_tty && printf "%b[%s]%b %s\n" "$CR" "$(ts)" "$CN" "$m" > /dev/tty; exit 1; }
-
-on_error() { local ec=$? ln=${BASH_LINENO[0]:-?}; warn "Error on or near line $ln (exit $ec)."; exit "$ec"; }
-trap on_error ERR INT TERM
-
-# ----------------------------- Preflight --------------------------------
-[[ ${EUID:-$(id -u)} -eq 0 ]] || die "Run as root"
-
-need() { command -v "$1" >/dev/null 2>&1; }
-missing=(); for c in zfs zstd mbuffer pv findmnt; do need "$c" || missing+=("$c"); done
-if ((${#missing[@]})); then
-  if need apt-get; then
-    log "Installing missing deps via apt-get: ${missing[*]}"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y
-    apt-get install -y --no-install-recommends zfsutils-linux zstd mbuffer pv util-linux
+# ------------------------------ Optional: export other pools --------------------
+log "Checking for other imported pools (besides '${POOL_NAME}')..."
+OTHER_POOLS="$(zpool list -H -o name | grep -vx "$POOL_NAME" || true)"
+if [[ -n "$OTHER_POOLS" ]]; then
+  warn "Other imported pools detected:"; printf "  - %s\n" $OTHER_POOLS
+  if confirm "Export these pools now so they can be safely re-imported later? [y/N]"; then
+    for p in $OTHER_POOLS; do log "Exporting pool: $p"; zpool export "$p"; done
+    log "Export complete. Re-import later with: zpool import <poolname>"
   else
-    die "Please install: ${missing[*]}"
+    warn "Leaving them imported. Export if you hit GUID/name conflicts."
   fi
 else
-  ok "All dependencies present."
+  log "No other imported pools detected."
 fi
 
-# ---------------------- Auto-mount WRITELOCK to /write-lock --------------
-ensure_writelock_mounted() {
-  local want_dir="/write-lock"
-  local dev=""
-  local current=""
-  mkdir -p "$want_dir"
+# ------------------------------ Inputs / Discovery ------------------------------
+# Defaults (per your request):
+#   FULL_ZST default: /var/lib/vz/dump/rpool.full.zst
+#   INCR_GLOB default: /var/lib/vz/dump/*.incr.zst
+FULL_ZST="${FULL_ZST:-}"
+INCR_GLOB="${INCR_GLOB:-/var/lib/vz/dump/*.incr.zst}"
+RESUME_FROM="${RESUME_FROM:-}"
+AUTO_RESUME="${AUTO_RESUME:-}"
 
-  # If FULL already readable where we expect it, we're done
-  if [[ -r "$FULL_PATH" ]]; then
-    ok "Found FULL at ${FULL_PATH} (no auto-mount needed)."
-    return 0
+ask_file(){
+  local name="$1" def="$2" label="$3"
+  local current; current="$(get_var "$name")"
+  if [[ -z "$current" ]]; then
+    local prompt="Path to ${label}"
+    [[ -n "$def" ]] && prompt+=" [${def}]"
+    prompt+=": "
+    local ans; read -r -p "$prompt" ans || true
+    ans="${ans:-$def}"
+    set_var "$name" "$ans"
   fi
+}
 
-  # Prefer /dev/disk/by-label/WRITELOCK
-  if [[ -e /dev/disk/by-label/WRITELOCK ]]; then
-    dev="$(readlink -f /dev/disk/by-label/WRITELOCK || true)"
-  else
-    # Fallback: try blkid scan for LABEL="WRITELOCK"
-    dev="$(blkid -t LABEL='WRITELOCK' -o device 2>/dev/null | head -n1 || true)"
+default_full="/var/lib/vz/dump/rpool.full.zst"
+log "Collecting backup inputs…"
+ask_file FULL_ZST "$default_full" "FULL backup (.zst), e.g. rpool.full.zst"
+FULL_ZST="$(get_var FULL_ZST)"
+[[ -f "$FULL_ZST" ]] || die "FULL backup not found: $FULL_ZST"
+
+# Safer globbing for incrementals (no literal when no matches)
+shopt -s nullglob
+INCR_FILES=( $INCR_GLOB )
+if (( ${#INCR_FILES[@]} )); then
+  # Natural sort
+  mapfile -t INCR_FILES < <(printf '%s\n' "${INCR_FILES[@]}" | sort -V)
+  log "Detected incrementals (in order):"
+  printf "  - %s\n" "${INCR_FILES[@]}"
+else
+  warn "No incrementals matched glob: $INCR_GLOB"
+fi
+shopt -u nullglob
+
+# ------------------------------ ZFS Helpers ------------------------------------
+ensure_namespace(){
+  # Create or (optionally) destroy+recreate rpool/RESTORE
+  if zfs list -H -o name "$RESTORE_NS" >/dev/null 2>&1; then
+    warn "Namespace exists: '$RESTORE_NS'"
+    if confirm "DELETE existing namespace to do a clean receive? [y/N]"; then
+      warn "About to DESTROY '$RESTORE_NS' recursively!"
+      if confirm "FINAL CONFIRM — destroy '${RESTORE_NS}' and all descendants? [y/N]"; then
+        zfs destroy -r "$RESTORE_NS"; log "Destroyed old namespace."
+      else
+        die "User cancelled namespace destruction."
+      fi
+    else
+      warn "Re-using existing namespace as-is."
+    fi
   fi
-
-  if [[ -z "$dev" ]]; then
-    warn "Device with LABEL=WRITELOCK not found. Please label your partition and/or plug it in."
-    return 1
+  if ! zfs list -H -o name "$RESTORE_NS" >/dev/null 2>&1; then
+    log "Creating namespace: $RESTORE_NS"; zfs create -p "$RESTORE_NS"
   fi
+}
 
-  # Is it already mounted somewhere?
-  current="$(findmnt -no TARGET -S "$dev" 2>/dev/null || true)"
-  if [[ -n "$current" ]]; then
-    # Bind-mount into /write-lock if mounted elsewhere
-    if [[ "$current" != "$want_dir" ]]; then
-      warn "LABEL=WRITELOCK is mounted at ${current}; bind-mounting it to ${want_dir}"
-      mount --bind "$current" "$want_dir" || die "Bind-mount failed."
+restore_has_children(){
+  # True if any descendant exists under rpool/RESTORE
+  zfs list -H -r -o name "$RESTORE_NS" | grep -q "^${RESTORE_NS}/"
+}
+
+list_toplevel_children(){
+  # Only depth-1 children (toplevel under RESTORE)
+  zfs list -H -r -o name "$RESTORE_NS" \
+  | grep -E "^${RESTORE_NS}/[^/]+$" || true
+}
+
+dataset_snaps_oldest_newest(){
+  # Returns: "<oldest-snap> <newest-snap>" for the given dataset (snapshots on that dataset only)
+  local ds="$1"
+  local snaps
+  snaps="$(zfs list -H -t snapshot -o name -S creation -r "$ds" | awk -F@ -v p="$ds" '$1==p{print $0}')" || true
+  [[ -n "$snaps" ]] || return 1
+  local newest; newest="$(echo "$snaps" | head -n1)"
+  local oldest; oldest="$(echo "$snaps" | tail -n1)"
+  printf "%s %s\n" "$oldest" "$newest"
+}
+
+# ------------------------------ Receiving Streams ------------------------------
+receive_stream_into(){
+  # Receives a FULL or INCR stream under rpool/RESTORE, with -d -u and filtered zvol mountpoint warnings
+  local zst="$1"
+  local label="$2"
+  [[ -f "$zst" ]] || die "Missing stream: $zst"
+  log "Ready to receive ${label} into '${RESTORE_NS}'."
+  if ! confirm "Proceed receiving ${label}? This may overwrite existing datasets under '${RESTORE_NS}'. [y/N]"; then
+    die "User aborted ${label} receive."
+  fi
+  local recv_cmd=( zfs recv -Fud -x mountpoint "$RESTORE_NS" )
+  if [[ -n "$PV_BIN" ]]; then
+    local size; size="$(du -b -- "$zst" 2>/dev/null | awk '{print $1}')" || size=""
+    if [[ -n "$size" ]]; then
+      zstd -dc -- "$zst" | "$PV_BIN" -s "$size" | "${recv_cmd[@]}" \
+        2> >(grep -v "property 'mountpoint' does not apply to datasets of this type" >&2)
+    else
+      zstd -dc -- "$zst" | "$PV_BIN" | "${recv_cmd[@]}" \
+        2> >(grep -v "property 'mountpoint' does not apply to datasets of this type" >&2)
     fi
   else
-    # Mount it fresh (let mount auto-detect fs)
-    log "Mounting ${dev} at ${want_dir}"
-    mount -o rw,noatime,nodiratime "$dev" "$want_dir" || die "Mount ${dev} → ${want_dir} failed."
+    zstd -dc -- "$zst" | "${recv_cmd[@]}" \
+      2> >(grep -v "property 'mountpoint' does not apply to datasets of this type" >&2)
+  fi
+  log "${label} receive complete."
+}
+
+# Incremental preflight helpers
+incr_required_fromsnap(){
+  # Extract the 'fromsnap' (name only) from an INCR stream; empty if zstreamdump unavailable
+  command -v zstreamdump >/dev/null 2>&1 || { echo ""; return; }
+  zstd -dc -- "$1" | zstreamdump -v | awk '/fromsnap = /{print $3; exit}'
+}
+preflight_incr_has_base(){
+  # Return 0 if '@fromsnap' exists somewhere under RESTORE
+  local from="$1"; [[ -z "$from" ]] && return 0
+  zfs list -t snapshot -r "$RESTORE_NS" -H -o name | grep -q "@${from}\$"
+}
+
+# ------------------------------ Replication (RESTORE -> rpool) -----------------
+replicate_one_dataset(){
+  # Defensive: ensure argument provided
+  if [[ $# -lt 1 ]]; then
+    die "replicate_one_dataset: missing source dataset argument"
   fi
 
-  # Re-evaluate path after mounting
-  if [[ -r "$FULL_PATH" ]]; then
-    ok "Mounted WRITELOCK; found FULL at ${FULL_PATH}."
-    return 0
+  # Split assignments to avoid nounset issues with multi-assignment
+  local src; src="$1"
+  local rel; rel="${src#${RESTORE_NS}/}"
+  local dst; dst="${POOL_NAME}/${rel}"
+
+  log "Planning: $src  →  $dst"
+
+  # Snapshot range
+  local range; range="$(dataset_snaps_oldest_newest "$src" || true)"
+  if [[ -z "$range" ]]; then
+    warn "No snapshots on $src. Creating temporary snapshot of current state."
+    local ts; ts="$(date +%Y%m%d-%H%M%S)"
+    zfs snapshot "$src@_restore_tmp_${ts}"
+    range="$(dataset_snaps_oldest_newest "$src")" || die "Failed to snapshot $src"
+  fi
+  local oldest; oldest="$(awk '{print $1}' <<<"$range")"
+  local newest; newest="$(awk '{print $2}' <<<"$range")"
+  local oldest_name; oldest_name="${oldest#*@}"
+
+  log "Will replicate with history:"
+  log "  Oldest: $oldest"
+  log "  Newest: $newest"
+
+  # Determine if the destination already has the base snapshot lineage
+  local has_base=0
+  if zfs list -H -o name "$dst" >/dev/null 2>&1 && zfs list -t snapshot -H -o name "$dst@$oldest_name" >/dev/null 2>&1; then
+    has_base=1
+  fi
+
+  # If base missing, or destination missing, seed with FULL using -e mapping into POOL root
+  if [[ $has_base -eq 0 ]]; then
+    warn "Destination base snapshot not present (or dataset missing). Seeding FULL snapshot first."
+    if ! confirm "Send FULL snapshot '$oldest' → '${POOL_NAME}' (mapped with -e → '${dst}')? [y/N]"; then
+      warn "Skipping $dst by user choice."; return 0; fi
+    if [[ -n "$PV_BIN" ]]; then
+      zfs send -R "$oldest" | "$PV_BIN" | zfs recv -u -F -e "$POOL_NAME"
+    else
+      zfs send -R "$oldest" | zfs recv -u -F -e "$POOL_NAME"
+    fi
+    log "Seeded '${dst}' with FULL snapshot."
+  fi
+
+  # If there are newer snaps, apply incrementals using -e mapping as well
+  if [[ "$newest" != "$oldest" ]]; then
+    if ! confirm "Apply INCREMENTALS from '$oldest' → '$newest' to '${dst}'? [y/N]"; then
+      warn "Skipping incrementals for $dst by user choice."; return 0; fi
+    if [[ -n "$PV_BIN" ]]; then
+      zfs send -R -I "$oldest" "$newest" | "$PV_BIN" | zfs recv -F -e "$POOL_NAME"
+    else
+      zfs send -R -I "$oldest" "$newest" | zfs recv -F -e "$POOL_NAME"
+    fi
+    log "Applied incrementals to '${dst}'."
   else
-    warn "Mounted WRITELOCK, but ${FULL_PATH} not found. Check filenames in ${want_dir}."
-    return 1
+    log "No incrementals to apply for '${dst}' (single snapshot)."
+  fi
+
+  log "Replication complete: $dst"
+}
+
+# ------------------------------ Step Runner / Resume ---------------------------
+run_step(){ local n="$1" title="$2"; log "Step $n — $title"; }
+
+auto_resume_decision(){
+  # If RESTORE already populated, offer to skip to step 4 unless user explicitly set RESUME_FROM
+  if restore_has_children; then
+    if [[ "${RESUME_FROM:-}" =~ ^[1-8]$ ]]; then
+      return 1
+    fi
+    if [[ "${AUTO_RESUME:-}" == "1" ]]; then
+      RESUME_FROM=4; return 0
+    fi
+    warn "Detected existing datasets under ${RESTORE_NS}."
+    if confirm "Skip receives and resume at step 4 (replication)? [y/N]"; then
+      RESUME_FROM=4; return 0
+    fi
+  fi
+  return 1
+}
+
+# Build toplevel & candidates (used in step 5, and also when resuming at 6/7)
+build_candidates(){
+  toplevel="$(list_toplevel_children)"
+  if [[ -z "$toplevel" ]]; then
+    die "No toplevel datasets found under ${RESTORE_NS} — unexpected."
+  fi
+  candidates="$(echo "$toplevel" | awk -v incre="$INCLUDE_TOPLEVEL_REGEX" -v exre="$EXCLUDE_TOPLEVEL_REGEX" '
+     $0 ~ incre && $0 !~ exre { print $0 }')"
+  if [[ -z "$candidates" ]]; then
+    die "No eligible VM/LXC datasets matched under ${RESTORE_NS}. (Includes: data/*, subvol-*; Excludes: ROOT/*)"
   fi
 }
 
-# Try to ensure /write-lock is mounted with the backups before checking the files
-ensure_writelock_mounted || true
-
-zpool list "$TARGET_POOL" >/dev/null 2>&1 || die "Target pool '$TARGET_POOL' not found."
-if (( ACTIVATE_STAGED == 0 )); then
-  [[ -r "$FULL_PATH" ]] || die "FULL not found/readable: $FULL_PATH (ensure /write-lock contains your .zst files)"
-fi
-
-# ----------------------------- Common helpers ----------------------------
-pool_is_busy() {
-  zfs list -H -o mounted -r "$TARGET_POOL" 2>/dev/null | grep -q '^yes$'
+# Ensure a dataset is mounted (for var-lib-vz copy)
+ensure_mounted(){
+  local ds="$1"
+  local mp; mp="$(zfs get -H -o value mountpoint "$ds" 2>/dev/null || echo "-")"
+  if [[ "$mp" == "legacy" || "$mp" == "none" || -z "$mp" ]]; then
+    mp="/mnt/${ds//\//_}"
+    zfs set mountpoint="$mp" "$ds"
+  fi
+  if ! mountpoint -q "$mp"; then
+    zfs mount "$ds" || true
+  fi
+  echo "$mp"
 }
-dataset_exists() { zfs list -H -o name "$1" >/dev/null 2>&1; }
 
-# -------------------------------------------------------------------------
-# ACTIVATION MODE (no receive): --activate-staged
-# -------------------------------------------------------------------------
-if (( ACTIVATE_STAGED )); then
-  if pool_is_busy; then
-    die "Activation requires the target pool to be idle/unmounted. Boot from another OS/pool or live ISO."
-  fi
+# ------------------------------ Execution Flow ---------------------------------
+# Determine resume point
+if [[ -z "${RESUME_FROM:-}" ]]; then
+  auto_resume_decision || true
+fi
+RESUME_FROM="${RESUME_FROM:-1}"
 
-  # Auto-detect newest __staged-* if not provided
-  if [[ -z "$STAGED_NAME" ]]; then
-    STAGED_NAME="$(zfs list -H -o name -r "$TARGET_POOL" 2>/dev/null \
-      | awk -F/ -v p="$TARGET_POOL" 'index($0,p"/__staged-")==1 {print $0}' \
-      | awk -F/ '{print $2}' | sort | tail -n1)"
-    [[ -n "$STAGED_NAME" ]] || die "No __staged-* subtree found under ${TARGET_POOL}. Nothing to activate."
-    log "Auto-selected staged subtree: ${STAGED_NAME}"
-  fi
+# Initialize vars to avoid unbound with set -u on resume
+toplevel=""
+candidates=""
+PER_DATASET_CONFIRM=0
 
-  STAGED_ROOT="${TARGET_POOL}/${STAGED_NAME}"
-  [[ "$STAGED_ROOT" == ${TARGET_POOL}/__staged-* ]] || die "Invalid staged name: ${STAGED_NAME}"
-  dataset_exists "$STAGED_ROOT" || die "Staged dataset not found: ${STAGED_ROOT}"
-
-  STAGED_ROOT_DIR="${STAGED_ROOT}/ROOT"
-  dataset_exists "$STAGED_ROOT_DIR" || die "Expected ${STAGED_ROOT_DIR} to exist within staged subtree."
-
-  ts_now="$(date +%Y%m%d-%H%M%S)"
-  ROOT_DS="${TARGET_POOL}/ROOT"
-
-  warn "Activation will rename ${STAGED_ROOT}/ROOT → ${ROOT_DS} and set mountpoints/bootfs."
-  if dataset_exists "$ROOT_DS"; then
-    warn "Existing ${ROOT_DS} found; will rename to ${ROOT_DS}.old-${ts_now}"
-  fi
-  (( FORCE==1 )) || { read -r -p "Proceed with activation? (yes/no) " ans; [[ "$ans" == "yes" ]] || die "Aborted."; }
-
-  # Rename existing ROOT out of the way (if present)
-  if dataset_exists "$ROOT_DS"; then
-    zfs rename -f "$ROOT_DS" "${ROOT_DS}.old-${ts_now}"
-    ok "Renamed existing ROOT to ${ROOT_DS}.old-${ts_now}"
-  fi
-
-  # Promote staged ROOT to canonical ROOT
-  zfs rename -f "$STAGED_ROOT_DIR" "$ROOT_DS"
-  ok "Promoted ${STAGED_ROOT_DIR} → ${ROOT_DS}"
-
-  # Remove the now-empty staged container (best-effort)
-  if dataset_exists "$STAGED_ROOT"; then
-    zfs destroy -r "$STAGED_ROOT" || true
-  fi
-
-  # Clear temporary receive-time overrides and set proper mountpoints
-  zfs inherit -r mountpoint "$ROOT_DS" || true
-  zfs set canmount=on -r "$ROOT_DS" || true
-  zfs set mountpoint=/ "$ROOT_DS" || true
-
-  # Try to select a bootfs if obvious (single child under ROOT)
-  BOOTFS_CANDIDATES=()
-  mapfile -t BOOTFS_CANDIDATES < <(zfs list -H -o name -t filesystem -r "$ROOT_DS" \
-    | awk -v root="$ROOT_DS" -F/ '$0 ~ "^"root"/" { if (split($0,a,"/")==3) print $0 }')
-
-  if (( ${#BOOTFS_CANDIDATES[@]} == 1 )); then
-    zpool set bootfs="${BOOTFS_CANDIDATES[0]}" "$TARGET_POOL" || true
-    ok "Set bootfs=${BOOTFS_CANDIDATES[0]} on ${TARGET_POOL} (auto-selected)."
-  else
-    warn "Multiple or zero bootfs candidates under ${ROOT_DS}. Set manually if needed, e.g.:"
-    warn "  zpool set bootfs=${TARGET_POOL}/ROOT/<YOUR-ROOT-DATASET> ${TARGET_POOL}"
-  fi
-
-  if (( DO_MOUNT )); then
-    zfs mount -a || warn "Some filesystems may need manual mounting."
-    ok "Activation mount complete."
-  else
-    log "Activation complete. Use 'zfs mount -a' when ready."
-  fi
-
-  ok "Activation finished."
-  exit 0
+# Step 1 — Prepare restore namespace
+if (( RESUME_FROM <= 1 )); then
+  run_step "1/8" "Prepare restore namespace"
+  ensure_namespace
+  pause_enter
+else
+  log "Skipping Step 1 (resume from step $RESUME_FROM)"
 fi
 
-# -------------------------------------------------------------------------
-# RESTORE MODE (receive FULL + INCR)
-# -------------------------------------------------------------------------
-choose_incr() {
-  if [[ -n "$EXPLICIT_INCR" ]]; then echo "$EXPLICIT_INCR"; return; fi
-  if [[ -n "$SELECT_TS" ]]; then echo "${DEST_DIR}/${INCR_BASENAME}.${SELECT_TS}.incr.zst"; return; fi
-  echo "$INCR_SYMLINK"
-}
-INCR_PATH="$(choose_incr)"
-if [[ -L "$INCR_PATH" ]]; then INCR_REAL="$(realpath -m "$INCR_PATH" 2>/dev/null || readlink -f "$INCR_PATH")"; else INCR_REAL="$INCR_PATH"; fi
-if [[ ! -r "$INCR_REAL" ]]; then warn "Incremental not found/readable: ${INCR_REAL} — proceeding with FULL only."; INCR_REAL=""; fi
+# Step 2 — Receive FULL stream
+if (( RESUME_FROM <= 2 )); then
+  run_step "2/8" "Receive FULL stream"
+  receive_stream_into "$FULL_ZST" "FULL"
+  pause_enter
+else
+  log "Skipping Step 2 (resume from step $RESUME_FROM)"
+fi
 
-ts_now="$(date +%Y%m%d-%H%M%S)"
-RECEIVE_PROPS=()  # extra -o/-x receive properties for staged mode
-STAGED_MODE=0
-
-if (( OVERWRITE_ROOT )); then
-  if pool_is_busy; then
-    STAGED_MODE=1
-    warn "--overwrite-root requested but ${TARGET_POOL} is busy → switching to SAFE STAGED RESTORE."
-    RESTORE_ROOT="${TARGET_POOL}/__staged-${ts_now}"
-    STAGED_MOUNT="/mnt/zfs-restore-${ts_now}"
-    RECEIVE_PROPS+=( -x mountpoint -o "mountpoint=${STAGED_MOUNT}" -o "canmount=noauto" )
+# Step 3 — Apply ALL incrementals (if any)
+if (( RESUME_FROM <= 3 )); then
+  run_step "3/8" "Apply ALL incrementals (if any)"
+  if (( ${#INCR_FILES[@]} )); then
+    if ! confirm "Apply ALL detected incrementals in order after FULL? [y/N]"; then
+      die "User aborted incremental application."
+    fi
+    for incr in "${INCR_FILES[@]}"; do
+      [[ -f "$incr" ]] || die "Incremental missing: $incr"
+      local local_from; local_from="$(incr_required_fromsnap "$incr" || true)"
+      if [[ -n "$local_from" ]]; then
+        log "Preflight: '$(basename "$incr")' requires base snapshot '@${local_from}' under '${RESTORE_NS}'."
+        if preflight_incr_has_base "$local_from"; then
+          log "  ✓ Base snapshot '@${local_from}' found under RESTORE."
+        else
+          err "  ✗ Base snapshot '@${local_from}' NOT found under RESTORE. Cannot apply '$(basename "$incr")'."
+          err "    → Ensure FULL + earlier incrementals were applied correctly and in order."
+          exit 1
+        fi
+      else
+        warn "Skipping preflight for '$(basename "$incr")' (zstreamdump missing or undetectable)."
+      fi
+      receive_stream_into "$incr" "INCREMENTAL ($(basename "$incr"))"
+    done
   else
-    RESTORE_ROOT="${TARGET_POOL}"
+    warn "No incrementals detected — proceeding with FULL only."
+  fi
+  pause_enter
+else
+  log "Skipping Step 3 (resume from step $RESUME_FROM)"
+fi
+
+# Step 4 — Sanity check RESTORE namespace
+if (( RESUME_FROM <= 4 )); then
+  run_step "4/8" "Sanity check RESTORE namespace"
+  if ! restore_has_children; then
+    warn "No descendants detected under ${RESTORE_NS}."
+    warn "If you previously received without '-d', data may have landed at pool root."
+    zfs list -r "$POOL_NAME" | sed -n '1,80p'
+    die "No datasets found under ${RESTORE_NS}. Re-run receives (this script uses '-d')."
   fi
 else
-  if [[ -z "$INTO_NAME" ]]; then INTO_NAME="restore-${ts_now}"; fi
-  RESTORE_ROOT="${TARGET_POOL}/${INTO_NAME}"
+  log "Skipping Step 4 (resume from step $RESUME_FROM)"
 fi
 
-log "Restore root target: ${RESTORE_ROOT}"
-log "Receive flags: ${RECEIVE_FLAGS}"
-log "FULL: ${FULL_PATH}"
-log "INCR: ${INCR_REAL:-<none>}"
-
-# Preview only
-if (( PREVIEW )); then
-  need zstreamdump || die "Preview requires zstreamdump."
-  log "Previewing FULL stream…"
-  zstd -d -q -c -- "$FULL_PATH" | zstreamdump -v | sed 's/^/[FULL] /'
-  if [[ -n "$INCR_REAL" ]]; then
-    log "Previewing INCR stream…"
-    zstd -d -q -c -- "$INCR_REAL" | zstreamdump -v | sed 's/^/[INCR] /'
+# Step 5 — Enumerate candidates (VM/LXC only; skip exclusions)
+if (( RESUME_FROM <= 5 )); then
+  run_step "5/8" "Enumerate toplevel datasets under ${RESTORE_NS}"
+  toplevel="$(list_toplevel_children)"
+  [[ -n "$toplevel" ]] || die "No toplevel datasets found under ${RESTORE_NS} — unexpected."
+  echo "All top-level datasets:"; printf "  - %s\n" $toplevel; echo
+  log "Filtering to VM/LXC datasets and skipping exclusions…"
+  candidates="$(echo "$toplevel" | awk -v incre="$INCLUDE_TOPLEVEL_REGEX" -v exre="$EXCLUDE_TOPLEVEL_REGEX" '
+     $0 ~ incre && $0 !~ exre { print $0 }')"
+  if [[ -z "$candidates" ]]; then
+    die "No eligible VM/LXC datasets matched under ${RESTORE_NS}. (Includes: data/*, subvol-*; Excludes: ROOT/*)"
   fi
-  ok "Preview complete."
-  exit 0
-fi
-
-# Collision checks & confirmations
-if (( OVERWRITE_ROOT )) && (( STAGED_MODE == 0 )); then
-  warn "You chose TRUE OVERWRITE of ${TARGET_POOL}. This will destroy existing datasets/snapshots."
-  if (( FORCE != 1 )); then read -r -p "Type 'OVERWRITE' to proceed: " ans; [[ "$ans" == "OVERWRITE" ]] || die "Aborted."; fi
-
-  warn "Destroying descendants under ${TARGET_POOL}…"
-  zfs destroy -r -f "${TARGET_POOL}" || true
-
-  warn "Destroying snapshots on root dataset ${TARGET_POOL} (if any)…"
-  zfs list -H -t snapshot -o name -r "${TARGET_POOL}" 2>/dev/null \
-    | awk -F@ -v root="${TARGET_POOL}" 'NF==2 && $1==root {print $0}' \
-    | while read -r snap; do zfs destroy -f -- "$snap" || true; log "Destroyed root snapshot: $snap"; done
-
-  ok "Existing hierarchy under ${TARGET_POOL} wiped."
-else
-  if dataset_exists "$RESTORE_ROOT"; then
-    die "Target dataset exists: ${RESTORE_ROOT}. Use --into <newname> or choose another name."
+  echo "Candidates to replicate (descendants included via -R):"; printf "  - %s\n" $candidates; echo
+  if ! confirm "Proceed to replicate the above list into '${POOL_NAME}'? [y/N]"; then
+    die "User aborted before replication."
   fi
-fi
-
-if (( FORCE != 1 )); then
-  read -r -p "Proceed with receive into ${RESTORE_ROOT}? (yes/no) " ans
-  [[ "$ans" == "yes" ]] || die "User aborted."
-fi
-
-# Apply FULL + INCR
-set -o pipefail
-
-log "Applying FULL → ${RESTORE_ROOT}"
-zstd -d -q -c -- "$FULL_PATH" \
-  | pv -petar \
-  | mbuffer -m "$MBUF_SIZE" -q \
-  | zfs receive ${RECEIVE_FLAGS} "${RECEIVE_PROPS[@]}" -- "$RESTORE_ROOT"
-ok "FULL applied."
-
-if [[ -n "$INCR_REAL" ]]; then
-  log "Applying INCR → ${RESTORE_ROOT}"
-  zstd -d -q -c -- "$INCR_REAL" \
-    | pv -petar \
-    | mbuffer -m "$MBUF_SIZE" -q \
-    | zfs receive ${RECEIVE_FLAGS} "${RECEIVE_PROPS[@]}" -- "$RESTORE_ROOT"
-  ok "INCR applied."
+  if confirm "Ask for confirmation PER dataset? [y/N]"; then PER_DATASET_CONFIRM=1; fi
 else
-  warn "No incremental applied; dataset state is at FULL snapshot point-in-time."
+  log "Skipping Step 5 (resume from step $RESUME_FROM)"
+  # If resuming beyond step 5, rebuild candidates so later steps have it.
+  build_candidates
 fi
 
-set +o pipefail
+# Step 6 — Ensure destination datasets/parents exist (optional)
+if (( RESUME_FROM <= 6 )); then
+  run_step "6/8" "Ensure destination datasets/parents exist"
+else
+  log "Skipping Step 6 (resume from step $RESUME_FROM)"
+fi
 
-# Mounting
-if (( DO_MOUNT )); then
-  if (( STAGED_MODE == 1 )); then
-    log "Enabling canmount=on and mounting staged subtree under redirected mountpoint."
-    zfs set canmount=on "$RESTORE_ROOT" || true
-    zfs list -H -o name -t filesystem -r -- "$RESTORE_ROOT" \
-      | while read -r fs; do zfs mount "$fs" || warn "Failed to mount $fs"; done
-    ok "Mounted staged restore at redirected mountpoint(s)."
-  elif (( OVERWRITE_ROOT )); then
-    log "Mounting all filesystems on ${TARGET_POOL} (overwrite-root)."
-    zfs mount -a || warn "Some filesystems may need manual mounting."
-    ok "Mount complete."
+need_create=()
+need_parents=()
+
+for ds in $candidates; do
+  rel="${ds#${RESTORE_NS}/}"
+  dst="${POOL_NAME}/${rel}"
+  parent="$(dirname "$dst")"
+  if ! zfs list -H -o name "$parent" >/dev/null 2>&1; then
+    need_parents+=("$parent")
+  fi
+  if ! zfs list -H -o name "$dst" >/dev/null 2>&1; then
+    need_create+=("$dst")
+  fi
+done
+
+if [[ ${#need_parents[@]} -gt 0 ]]; then
+  mapfile -t uniq_parents < <(printf "%s\n" "${need_parents[@]}" | sort -u)
+  echo "Destination parent datasets missing:"
+  printf "  - %s\n" "${uniq_parents[@]}"
+  if confirm "Create ALL missing parents now? [y/N]"; then
+    for p in "${uniq_parents[@]}"; do
+      log "Creating parent dataset: $p"
+      zfs create -p "$p"
+    done
   else
-    log "Mounting filesystems under ${RESTORE_ROOT}."
-    zfs list -H -o name -t filesystem -r -- "$RESTORE_ROOT" \
-      | while read -r fs; do zfs mount "$fs" || warn "Failed to mount $fs"; done
-    ok "Mount complete."
+    warn "Not creating parents. (Replication mapping with -e can still create targets.)"
   fi
 else
-  log "Skipping mount (no --mount)."
+  log "All destination parents already exist."
 fi
 
-ok "Restore complete."
+if [[ ${#need_create[@]} -gt 0 ]]; then
+  mapfile -t uniq_targets < <(printf "%s\n" "${need_create[@]}" | sort -u)
+  echo "Destination datasets absent and can be created (optional):"
+  printf "  - %s\n" "${uniq_targets[@]}"
+  if confirm "Create ALL missing destination datasets now? [y/N]"; then
+    for t in "${uniq_targets[@]}"; do
+      log "Creating empty dataset: $t"
+      zfs create -p "$t"
+    done
+  else
+    warn "Not creating destination datasets. Replication will seed them via FULL send if needed."
+  fi
+else
+  log "All destination datasets already exist."
+fi
 
-# Hints:
-# - If you restored in staged mode on a live system, later run (from a safe environment):
-#     zfs-disk-restore <POOL> --activate-staged --staged __staged-<ts> --yes --mount
+# Step 7 — Replication (history-preserving, correct mapping)
+if (( RESUME_FROM <= 7 )); then
+  run_step "7/8" "Replication (history-preserving)"
+else
+  log "Skipping Step 7 (resume from step $RESUME_FROM)"
+fi
+
+for ds in $candidates; do
+  if [[ "$ds" =~ ^${RESTORE_NS}/ROOT(/|$) ]]; then
+    warn "Skipping excluded dataset: $ds"; continue
+  fi
+  if (( PER_DATASET_CONFIRM )); then
+    if ! confirm "Replicate '$ds'? [y/N]"; then warn "Skipping '$ds'."; continue; fi
+  fi
+  replicate_one_dataset "$ds"
+  echo
+done
+
+# ------------------------------ Optional Step 7b: var-lib-vz artifacts ---------
+if zfs list -H -o name "${RESTORE_NS}/var-lib-vz" >/dev/null 2>&1; then
+  echo
+  if confirm "Also copy *filtered* artifacts (ISOs/templates/backups/images) from '${RESTORE_NS}/var-lib-vz' → '${POOL_NAME}/var-lib-vz'? [y/N]"; then
+    if ! zfs list -H -o name "${POOL_NAME}/var-lib-vz" >/dev/null 2>&1; then
+      if confirm "Create '${POOL_NAME}/var-lib-vz' now? [y/N]"; then
+        zfs create -p "${POOL_NAME}/var-lib-vz"
+        log "Created ${POOL_NAME}/var-lib-vz"
+      else
+        warn "Cannot proceed without destination '${POOL_NAME}/var-lib-vz'. Skipping var-lib-vz copy."
+        goto_post_cleanup=1
+      fi
+    fi
+
+    if [[ "${goto_post_cleanup:-0}" -eq 0 ]]; then
+      SRC_VZ_MP="$(ensure_mounted "${RESTORE_NS}/var-lib-vz")"
+      DST_VZ_MP="$(ensure_mounted "${POOL_NAME}/var-lib-vz")"
+
+      log "Source var-lib-vz mountpoint: $SRC_VZ_MP"
+      log "Destination var-lib-vz mountpoint: $DST_VZ_MP"
+
+      log "Scanning for allowed artifact types to copy…"
+      mapfile -t VZ_FILES < <(find "$SRC_VZ_MP" -type f -regextype posix-extended -regex ".*${VZ_INCLUDE_EXT_REGEX}" -print 2>/dev/null || true)
+      if (( ${#VZ_FILES[@]} == 0 )); then
+        warn "No matching artifacts found under '$SRC_VZ_MP'."
+      else
+        echo "Found ${#VZ_FILES[@]} artifact file(s) to copy."
+        if confirm "Proceed to copy these artifacts into '${DST_VZ_MP}'? [y/N]"; then
+          if command -v rsync >/dev/null 2>&1; then
+            tmp_list="$(mktemp)"
+            for f in "${VZ_FILES[@]}"; do printf "%s\0" "${f#$SRC_VZ_MP/}"; done > "$tmp_list"
+            (cd "$SRC_VZ_MP" && tr '\0' '\n' < "$tmp_list" | rsync -a --files-from=- "$SRC_VZ_MP"/ "$DST_VZ_MP"/)
+            rm -f "$tmp_list"
+          else
+            (cd "$SRC_VZ_MP" && printf "%s\0" "${VZ_FILES[@]#$SRC_VZ_MP/}" \
+              | tr '\0' '\n' \
+              | cpio -pdm "$DST_VZ_MP")
+          fi
+          log "var-lib-vz artifact copy complete."
+        else
+          warn "User declined artifact copy."
+        fi
+      fi
+    fi
+  fi
+fi
+
+pause_enter
+
+# Step 8 — Post-restore cleanup
+if (( RESUME_FROM <= 8 )); then
+  run_step "8/8" "Post-restore options"
+  if confirm "Delete the temporary namespace '${RESTORE_NS}' now? [y/N]"; then
+    warn "This will destroy '${RESTORE_NS}' recursively."
+    if confirm "FINAL CONFIRM — Destroy '${RESTORE_NS}'? [y/N]"; then
+      zfs destroy -r "$RESTORE_NS"; log "Removed restore namespace."
+    else
+      warn "Kept restore namespace."
+    fi
+  else
+    warn "Keeping restore namespace for inspection."
+  fi
+fi
+
+log "✅ Done. Your fresh '${POOL_NAME}/ROOT' was preserved, VM/LXC data restored, and (optionally) var-lib-vz artifacts copied."
+echo "Next steps:"
+echo "  • Proxmox UI → Datacenter → Storage: ensure ZFS storage points at '${POOL_NAME}'."
+echo "  • Restore or recreate VM configs in /etc/pve/qemu-server/*.conf (e.g.: scsi0: local-zfs:vm-101-disk-0,size=XXG)."
+echo "  • Start VMs: qm start <VMID>"

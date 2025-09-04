@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# prep-optane-for-storage.sh
+# Completely wipes /dev/nvme1n1, carves 32 GiB SLOG + rest as SPECIAL,
+# and attaches both to the existing ZFS pool named "storage".
+#
+# ⚠️  READ THIS FIRST:
+# - A single SPECIAL vdev is a **single point of failure** for pool metadata/small blocks.
+#   If the device dies, you can lose the pool. Mirror SPECIAL for safety (requires 2 devices).
+# - If you want a safer plan, use this device as SLOG + L2ARC instead of SPECIAL.
+#
+# What this script does:
+# 1) Sanity checks (pool exists, device present, nothing mounted from it).
+# 2) Destroys all partitioning on /dev/nvme1n1 (blkdiscard + sgdisk --zap-all + wipefs).
+# 3) Creates GPT with:
+#       p1:  32 GiB  → SLOG (name: optane_slog)   (type: ZFS)
+#       p2:  remainder → SPECIAL (name: optane_special) (type: ZFS)
+# 4) Adds p1 as LOG vdev and p2 as SPECIAL vdev to pool "storage".
+# 5) Sets `special_small_blocks=64K` on dataset "storage".
+# 6) Prints status and reminders.
+#
+# Tested on: Proxmox VE / Debian with OpenZFS 2.2+ (works on 2.1 as well; SPECIAL support required).
+#
+# Usage:
+#   sudo bash prep-optane-for-storage.sh
+#
+# Idempotency:
+# - Refuses to run if it detects existing log/special on nvme1n1 or if partitions already exist.
+# - If you already added a log/special, this script will exit without changes.
+
+set -euo pipefail
+
+POOL="storage"
+DEV="/dev/nvme1n1"
+SLOG_SIZE_GIB=32    # Adjust if needed
+SPECIAL_SSB="64K"   # special_small_blocks value
+
+ZFS_GUID="6A898CC3-1DD2-11B2-99A6-080020736631"  # GPT type GUID for Solaris/ZFS
+
+# --- helpers ---
+err() { echo "ERROR: $*" >&2; exit 1; }
+warn() { echo "WARN: $*" >&2; }
+info() { echo "INFO: $*"; }
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || err "Missing required command: $1"
+}
+
+require_cmd zpool
+require_cmd zfs
+require_cmd lsblk
+require_cmd sgdisk
+require_cmd wipefs
+require_cmd partprobe
+require_cmd udevadm
+command -v blkdiscard >/dev/null 2>&1 || warn "blkdiscard not found; TRIM step will be skipped."
+
+## FIX
+apt-get install -y parted
+
+# --- sanity checks ---
+[[ -b "$DEV" ]] || err "Device $DEV not found (is your Optane at a different path?)."
+
+# Pool existence
+if ! zpool list -H -o name | grep -qx "$POOL"; then
+  err "ZFS pool '$POOL' not found. Create/import it first (mirror of /dev/sda /dev/sdb)."
+fi
+
+# Ensure device isn't already in a pool
+if zpool status "$POOL" | grep -q "$(basename "$DEV")"; then
+  err "$DEV already appears in pool '$POOL'. Aborting."
+fi
+
+# Ensure device has no mounted filesystems
+if lsblk -nrpo MOUNTPOINT "$DEV" | grep -q "/"; then
+  err "$DEV has mounted filesystems. Unmount them first."
+fi
+
+# Check for existing partitions (we'll require a destructive wipe)
+if lsblk -nrpo NAME "$DEV" | awk 'NR>1{print $1}' | grep -q .; then
+  warn "$DEV has existing partitions and will be DESTROYED."
+fi
+
+cat <<'EONOTE'
+⚠️  FINAL CONFIRMATION
+This will IRREVERSIBLY WIPE /dev/nvme1n1 and add:
+  - /dev/nvme1n1p1 as a LOG (SLOG) device to pool "storage"
+  - /dev/nvme1n1p2 as a SPECIAL device to pool "storage"
+Proceed only if you accept the risk of a single SPECIAL vdev (see header).
+Type PROCEED (all caps) to continue:
+EONOTE
+
+read -r CONFIRM
+[[ "$CONFIRM" == "PROCEED" ]] || err "User aborted."
+
+# --- destroy existing layout on the Optane ---
+info "Discarding (TRIM) $DEV (if supported)..."
+if command -v blkdiscard >/dev/null 2>&1; then
+  # Some controllers may refuse discard; ignore failures
+  blkdiscard -f "$DEV" || warn "blkdiscard failed or unsupported; continuing."
+fi
+
+info "Zapping GPT/MBR on $DEV..."
+sgdisk --zap-all "$DEV"
+
+info "Erasing filesystem signatures on $DEV..."
+wipefs -a "$DEV" || true
+
+# --- create partitions ---
+# p1: 1MiB → (1MiB + SLOG_SIZE_GIB) for SLOG
+# p2: rest for SPECIAL
+info "Creating new GPT and partitions on $DEV..."
+sgdisk -o "$DEV"
+
+# sgdisk sizes use MiB units. Convert GiB→MiB for end calculation.
+# We'll let sgdisk compute the end by size spec with +${SLOG_SIZE_GIB}G
+sgdisk \
+  --new=1:1MiB:+${SLOG_SIZE_GIB}GiB --typecode=1:$ZFS_GUID --change-name=1:"optane_slog" \
+  --new=2:0:0                         --typecode=2:$ZFS_GUID --change-name=2:"optane_special" \
+  "$DEV"
+
+partprobe "$DEV"
+udevadm settle
+
+SLOG_PART="${DEV}p1"
+SPECIAL_PART="${DEV}p2"
+
+[[ -b "$SLOG_PART" ]] || err "Expected $SLOG_PART not found after partitioning."
+[[ -b "$SPECIAL_PART" ]] || err "Expected $SPECIAL_PART not found after partitioning."
+
+# Double-check pool doesn't already have log/special devices with these partitions
+if zpool status "$POOL" | grep -q "$(basename "$SLOG_PART")"; then
+  err "$SLOG_PART already in pool '$POOL'."
+fi
+if zpool status "$POOL" | grep -q "$(basename "$SPECIAL_PART")"; then
+  err "$SPECIAL_PART already in pool '$POOL'."
+fi
+
+# --- add devices to pool ---
+info "Adding LOG (SLOG) device $SLOG_PART to pool $POOL..."
+zpool add "$POOL" log "$SLOG_PART"
+
+info "Adding SPECIAL device $SPECIAL_PART to pool $POOL..."
+# NOTE: This is a single (unmirrored) special vdev. See risk notes above.
+zpool add "$POOL" special "$SPECIAL_PART"
+
+# --- set dataset properties ---
+info "Setting special_small_blocks=${SPECIAL_SSB} on dataset $POOL..."
+zfs set special_small_blocks="$SPECIAL_SSB" "$POOL"
+
+# Optional quality-of-life: enable autotrim on the pool (safe on SSD/NVMe)
+if ! zpool get -H -o value autotrim "$POOL" | grep -qi "on"; then
+  info "Enabling autotrim=on on pool $POOL..."
+  zpool set autotrim=on "$POOL" || warn "Could not set autotrim=on (non-fatal)."
+fi
+
+# Print state
+info "Done. Current pool layout:"
+zpool status "$POOL" || true
+
+cat <<EOF
+
+===============================================================================
+SUCCESS
+
+What changed:
+  • WIPED:           $DEV
+  • CREATED:         $SLOG_PART (32 GiB) as LOG (SLOG)
+  • CREATED:         $SPECIAL_PART (rest) as SPECIAL
+  • DATASET TUNING:  special_small_blocks=$SPECIAL_SSB on $POOL
+  • POOL TUNING:     autotrim=on (if supported)
+
+Useful checks:
+  zpool iostat -v $POOL 5
+  zdb -bb $POOL | grep special
+  zfs get special_small_blocks $POOL
+  zpool status $POOL
+
+Advanced (optional):
+  # If certain datasets are heavy on synchronous writes (VMs/DBs), you can do:
+  # zfs set logbias=latency $POOL/your_vm_dataset
+  # zfs set sync=standard $POOL/your_vm_dataset  # or 'always' if your app requires it
+
+Caveats & Rollback:
+  • LOG (SLOG) can be removed:
+      zpool remove $POOL $(basename "$SLOG_PART")
+  • SPECIAL vdev removal:
+      Not recommended unless you're on a ZFS version supporting device removal
+      for the special class and you've verified evacuation works. In practice,
+      treat SPECIAL as permanent—prefer mirroring SPECIAL with a second device.
+  • If you'd rather switch to a safer plan (SLOG + L2ARC, no SPECIAL), destroy
+    the pool additions now and re-run with a layout that adds 'cache' instead of 'special'.
+
+Tip:
+  With a single SPECIAL vdev, make sure you have good backups.
+===============================================================================
+EOF

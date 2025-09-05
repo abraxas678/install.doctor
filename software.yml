@@ -378,6 +378,32 @@ softwarePackages:
     _github: false
     _name: Android Platform Tools
     cask: android-platform-tools
+  crush:
+    _bin: crush
+    _github: https://github.com/charmbracelet/crush
+    _name: Crush AI Terminal
+    _short: Colorful, beautiful way to interact with AI from terminal
+    yay: crush-bin
+    npm: '@charmland/crush'
+    brew: charmbracelet/tap/crush
+    nix: github:numtide/nix-ai-tools#crush
+    winget: charmbracelet.crush
+  gemini-cli:
+    _bin: gemini
+    _github: https://github.com/google-gemini/gemini-cli
+    _name: Gemini CLI
+    _short: Gemini terminal-first experience
+    npm: '@google/gemini-cli'
+    brew: gemini-cli
+  opencode:
+    _bin: opencode
+    _github: https://github.com/sst/opencode
+    _name: OpenCode
+    _short: AI Terminal companion
+    npm: opencode-ai@latest
+    brew: sst/tap/opencode
+    paru: opencode-bin
+    script: curl -fsSL https://opencode.ai/install | bash
   android-studio:
     _app: Android Studio.app
     _bin: android-studio

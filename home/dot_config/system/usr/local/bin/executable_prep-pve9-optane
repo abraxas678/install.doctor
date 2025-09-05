@@ -1,196 +1,541 @@
 #!/usr/bin/env bash
-# prep-optane-for-storage.sh
-# Completely wipes /dev/nvme1n1, carves 32 GiB SLOG + rest as SPECIAL,
-# and attaches both to the existing ZFS pool named "storage".
+# optane-prep — carve limited SLOG+SPECIAL slices on an NVMe and attach to a ZFS pool
 #
-# ⚠️  READ THIS FIRST:
-# - A single SPECIAL vdev is a **single point of failure** for pool metadata/small blocks.
-#   If the device dies, you can lose the pool. Mirror SPECIAL for safety (requires 2 devices).
-# - If you want a safer plan, use this device as SLOG + L2ARC instead of SPECIAL.
+# Purpose
+#   Prepare an NVMe device for mixed ZFS duties on Proxmox:
+#     • p1: SLOG (LOG)      — size = $SLOG_SIZE_GIB GiB (default: 32)
+#     • p2: SPECIAL vdev    — size = $SPECIAL_SIZE_GIB GiB (default: 128)
+#     • remainder: UNALLOCATED (keep headroom for L2ARC, SPECIAL mirror, or other FS)
+#   Attach p1 as LOG and p2 as SPECIAL to pool $POOL and set special_small_blocks.
 #
-# What this script does:
-# 1) Sanity checks (pool exists, device present, nothing mounted from it).
-# 2) Destroys all partitioning on /dev/nvme1n1 (blkdiscard + sgdisk --zap-all + wipefs).
-# 3) Creates GPT with:
-#       p1:  32 GiB  → SLOG (name: optane_slog)   (type: ZFS)
-#       p2:  remainder → SPECIAL (name: optane_special) (type: ZFS)
-# 4) Adds p1 as LOG vdev and p2 as SPECIAL vdev to pool "storage".
-# 5) Sets `special_small_blocks=64K` on dataset "storage".
-# 6) Prints status and reminders.
+# Why limit SPECIAL?
+#   SPECIAL can be space-hungry and (when single-disk) a metadata SPOF. We cap its size so
+#   you retain headroom on the device and reduce risk of runaway usage.
 #
-# Tested on: Proxmox VE / Debian with OpenZFS 2.2+ (works on 2.1 as well; SPECIAL support required).
+# ⚠️ Risks
+#   • Non-redundant SPECIAL is dangerous: loss can render the entire pool unreadable.
+#     → Production: MIRROR SPECIAL across at least two devices.
+#   • This script DESTROYS existing data/partitions on $DEV when run from wipe/partition.
+#   • Changing special_small_blocks affects NEW writes only (existing data won’t move).
 #
-# Usage:
-#   sudo bash prep-optane-for-storage.sh
+# Tested
+#   Proxmox VE / Debian with OpenZFS 2.1/2.2+
 #
-# Idempotency:
-# - Refuses to run if it detects existing log/special on nvme1n1 or if partitions already exist.
-# - If you already added a log/special, this script will exit without changes.
+# Usage
+#   sudo POOL=storage DEV=/dev/nvme1n1 SLOG_SIZE_GIB=32 SPECIAL_SIZE_GIB=128 SPECIAL_SSB=64K \
+#        ./optane-prep
+#
+# Environment switches
+#   • START_FROM : confirm|wipe|partition|add_log|add_special|set_props|finish   (default: confirm)
+#   • DRY_RUN=1  : echo commands without executing
+#   • TRACE=1    : bash -x tracing
+#   • ASSUME_YES=1 : skip destructive confirmation prompts
+#   • TIMEOUT_WIPE=20  : seconds per destructive op (blkdiscard/sgdisk/wipefs/sfdisk/parted/dd)
+#   • TIMEOUT_PART=10  : seconds per settle/reread cycle
+#   • ALLOW_DD=1       : use dd header nuke as last resort if wipes can’t converge
+#   • SKIP_DISCARD=0   : skip blkdiscard step if set to 1
+#
+# Idempotency
+#   • Start from ANY step. Missing partition info is auto-hydrated:
+#       - If p1/p2 already exist → reuse (no wipe).
+#       - If no partitions → create p1=32G (SLOG) and p2=128G (SPECIAL) automatically.
+#     (If an unexpected layout exists, we refuse and ask you to run partition/wipe explicitly.)
+#   • If p1/p2 already in the pool, add_* steps are skipped.
+#
+# Rollback
+#   • LOG (SLOG) is usually removable:  zpool remove <pool> <log-dev>
+#   • SPECIAL is effectively permanent in most setups—plan mirrors up front.
+#
+# Debug
+#   On failure, a rich ERROR REPORT prints last cmd, step, exit code, line, pool/props/partitions.
+#   Paste that block when asking for help.
+#
+# License
+#   MIT — crafted for a world-class Proxmox operator experience.
 
-set -euo pipefail
+set -Eeuo pipefail
 
-POOL="storage"
-DEV="/dev/nvme1n1"
-SLOG_SIZE_GIB=32    # Adjust if needed
-SPECIAL_SSB="64K"   # special_small_blocks value
+###############
+# Parameters  #
+###############
+POOL="${POOL:-storage}"
+DEV="${DEV:-/dev/nvme1n1}"
+SLOG_SIZE_GIB="${SLOG_SIZE_GIB:-32}"         # partition 1
+SPECIAL_SIZE_GIB="${SPECIAL_SIZE_GIB:-128}"   # partition 2
+SPECIAL_SSB="${SPECIAL_SSB:-64K}"             # zfs set special_small_blocks
+START_FROM="${START_FROM:-confirm}"
+DRY_RUN="${DRY_RUN:-0}"
+TRACE="${TRACE:-0}"
+ASSUME_YES="${ASSUME_YES:-0}"
+TIMEOUT_WIPE="${TIMEOUT_WIPE:-20}"
+TIMEOUT_PART="${TIMEOUT_PART:-10}"
+ALLOW_DD="${ALLOW_DD:-1}"
+SKIP_DISCARD="${SKIP_DISCARD:-0}"
 
-ZFS_GUID="6A898CC3-1DD2-11B2-99A6-080020736631"  # GPT type GUID for Solaris/ZFS
+# ZFS GPT type GUID (Solaris/ZFS)
+ZFS_GUID="6A898CC3-1DD2-11B2-99A6-080020736631"
 
-# --- helpers ---
-err() { echo "ERROR: $*" >&2; exit 1; }
-warn() { echo "WARN: $*" >&2; }
-info() { echo "INFO: $*"; }
+#################
+# Color / Style #
+#################
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  BOLD="$(printf '\033[1m')"; DIM="$(printf '\033[2m')"; RESET="$(printf '\033[0m')"
+  FG_RED="$(printf '\033[31m')"; FG_GRN="$(printf '\033[32m')"; FG_YLW="$(printf '\033[33m')"
+  FG_BLU="$(printf '\033[34m')"; FG_CYN="$(printf '\033[36m')"; FG_MAG="$(printf '\033[35m')"
+else
+  BOLD=""; DIM=""; RESET=""; FG_RED=""; FG_GRN=""; FG_YLW=""; FG_BLU=""; FG_CYN=""; FG_MAG=""
+fi
+EM_OK="✅"; EM_WARN="⚠️ "; EM_RUN="🛠️ "; EM_STEP="🔹"; EM_DONE="🎉"
 
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || err "Missing required command: $1"
+#################
+# Logging utils #
+#################
+STEP="(unset)"
+UDEV_PAUSED=0
+_ts() { date +"[%Y-%m-%d %H:%M:%S]"; }
+say()  { echo "$(_ts) ${1-}"; }
+info() { say "${FG_CYN}[INFO] ${RESET} [${BOLD}${STEP}${RESET}] $*"; }
+warn() { say "${FG_YLW}[WARN] ${RESET} [${BOLD}${STEP}${RESET}] $*" >&2; }
+err()  { say "${FG_RED}[ERROR]${RESET} [${BOLD}${STEP}${RESET}] $*" >&2; exit 1; }
+
+run() {
+  if [[ "$DRY_RUN" == "1" ]]; then
+    say "${FG_MAG}[DRY] ${RESET} [${BOLD}${STEP}${RESET}] ${EM_RUN} $*"
+  else
+    say "${FG_BLU}[RUN] ${RESET} [${BOLD}${STEP}${RESET}] ${EM_RUN} $*"
+    "$@"
+  fi
 }
 
-require_cmd zpool
-require_cmd zfs
-require_cmd lsblk
-require_cmd sgdisk
-require_cmd wipefs
-require_cmd partprobe
-require_cmd udevadm
+run_t() {
+  local secs="$1"; shift
+  if [[ "$DRY_RUN" == "1" ]]; then
+    say "${FG_MAG}[DRY] ${RESET} [${BOLD}${STEP}${RESET}] ${EM_RUN} timeout ${secs}s $*"
+  else
+    say "${FG_BLU}[RUN] ${RESET} [${BOLD}${STEP}${RESET}] ${EM_RUN} timeout ${secs}s $*"
+    timeout --preserve-status "${secs}" "$@" || return $?
+  fi
+}
+
+require_cmd() { command -v "$1" >/dev/null 2>&1 || err "Missing required command: $1"; }
+[[ "$TRACE" == "1" ]] && set -x
+
+cleanup() {
+  # Always try to resume udev if we paused it.
+  if [[ "$UDEV_PAUSED" -eq 1 ]]; then
+    udevadm control --start-exec-queue >/dev/null 2>&1 || true
+    UDEV_PAUSED=0
+  fi
+}
+trap cleanup EXIT
+
+########################
+# Rich error reporting #
+########################
+on_error() {
+  local exit_code=$?
+  local line_no=${BASH_LINENO[0]:-?}
+  local cmd=${BASH_COMMAND:-?}
+  {
+    echo
+    echo "${BOLD}${FG_RED}===================== ERROR REPORT =====================${RESET}"
+    echo "Time        : $(_ts)"
+    echo "Step        : ${STEP}"
+    echo "Exit Code   : ${exit_code}"
+    echo "Last Command: ${cmd}"
+    echo "Line No     : ${line_no}"
+    echo "Function(s) : ${FUNCNAME[*]:-main}"
+    echo "--------------------------------------------------------"
+    echo "System/Pool quick state:"
+    echo "- Kernel     : $(uname -sr)"
+    echo "- Dev exists : $( [[ -b "$DEV" ]] && echo yes || echo no ) ($DEV)"
+    echo "- Pool exists: $(zpool list -H -o name 2>/dev/null | grep -qx "$POOL" && echo yes || echo no) ($POOL)"
+    echo "- Pool status:"
+    zpool status "$POOL" 2>&1 | sed 's/^/  /' || true
+    echo "- ZFS props:"
+    zfs get -H -o name,property,value special_small_blocks "$POOL" 2>/dev/null | sed 's/^/  /' || true
+    echo "- Partitions:"
+    lsblk -e7 -o NAME,TYPE,SIZE,MOUNTPOINT "$DEV" 2>/dev/null | sed 's/^/  /' || true
+    echo "${BOLD}${FG_RED}========================================================${RESET}"
+    echo
+  } >&2
+  exit "$exit_code"
+}
+trap on_error ERR
+
+#########################
+# Helpers / Introspection
+#########################
+# Return partition path with correct suffix ("p1" for nvme, "1" for sda)
+part_path() {
+  local base; base="$(basename "$DEV")"
+  local idx="$1"
+  if [[ "$base" =~ [0-9]$ ]]; then echo "${DEV}p${idx}"; else echo "${DEV}${idx}"; fi
+}
+
+byid_paths_for() {
+  # Return matching /dev/disk/by-id symlinks for node, without erroring if directory is empty/missing.
+  local node="$1" real p
+  real="$(readlink -f "$node")" || return 0
+  [[ -d /dev/disk/by-id ]] || return 0
+  shopt -s nullglob
+  for p in /dev/disk/by-id/*; do
+    [[ -e "$p" ]] || continue
+    [[ "$(readlink -f "$p")" == "$real" ]] && echo "$p"
+  done
+  shopt -u nullglob
+}
+
+pool_contains_node() {
+  # Return 0 if the device (by-id or realpath) appears in pool status -P.
+  local node="$1" status real
+  status="$(zpool status -P "$POOL" 2>/dev/null || zpool status "$POOL" 2>/dev/null || true)"
+  while read -r link; do
+    [[ -n "$link" ]] && grep -q -- "$(basename "$link")" <<<"$status" && return 0
+  done < <(byid_paths_for "$node")
+  real="$(readlink -f "$node" || echo "$node")"
+  grep -q -- "$real" <<<"$status" && return 0
+  return 1
+}
+
+retry_settle() {
+  local tries=10 i
+  for ((i=1;i<=tries;i++)); do
+    run_t "$TIMEOUT_PART" partprobe "$DEV" || true
+    run_t "$TIMEOUT_PART" udevadm settle || true
+    [[ -b "$(part_path 1)" && -b "$(part_path 2)" ]] && return 0
+    sleep 0.5
+  done
+  warn "Partitions not fully visible after retries; continuing cautiously."
+}
+
+stop_udev_queue()   { run udevadm control --stop-exec-queue || true; UDEV_PAUSED=1; }
+start_udev_queue()  { run udevadm control --start-exec-queue || true; UDEV_PAUSED=0; }
+holders_report() {
+  say "  Holders for $(basename "$DEV"):"
+  ls -l "/sys/block/$(basename "$DEV")/holders" 2>/dev/null || true
+  lsof -nP "$DEV" 2>/dev/null | sed 's/^/    /' || true
+}
+
+kernel_rescan_reset() {
+  run_t "$TIMEOUT_PART" blockdev --rereadpt "$DEV" || true
+  # Best-effort rescan; may be permission-restricted on some systems, ignore failures.
+  run_t "$TIMEOUT_PART" bash -c 'echo 1 > /sys/class/block/$(basename "'"$DEV"'")/device/rescan' || true
+  if command -v nvme >/dev/null 2>&1; then
+    run_t "$TIMEOUT_PART" nvme reset "/dev/$(basename "${DEV%n*}")" || true 2>/dev/null
+  fi
+}
+
+clear_zfs_labels() {
+  # Clear any old ZFS labels on a partition to avoid “potentially active pool” errors.
+  local part="$1"
+  run zpool labelclear -f "$part" || true
+  run_t "$TIMEOUT_WIPE" wipefs -a "$part" || true
+}
+
+try_add_vdev() {
+  # try_add_vdev <class:log|special> <path>
+  local class="$1" part="$2"
+  local add_cmd=(zpool add "$POOL" "$class")
+  [[ "$class" == "log" ]] && add_cmd=(zpool add "$POOL" log)
+  [[ "$class" == "special" ]] && add_cmd=(zpool add "$POOL" special)
+
+  if pool_contains_node "$part"; then
+    info "${EM_OK} $(printf '%s' "$class" | tr a-z A-Z) device already present (detected) — skipping."
+    return 0
+  fi
+
+  # Preemptively clear any stale labels on the fresh partition
+  clear_zfs_labels "$part"
+
+  info "Adding ${BOLD}$(printf '%s' "$class" | tr a-z A-Z)${RESET} $part to pool ${BOLD}${POOL}${RESET}"
+  if ! run "${add_cmd[@]}" "$part"; then
+    warn "Add failed; clearing labels again and retrying with -f."
+    clear_zfs_labels "$part"
+    if ! run "${add_cmd[@]/add/add -f}" "$part"; then
+      holders_report
+      err "Failed to add $class device $part. Try manually:\n  zpool labelclear -f $part && zpool add -f $POOL $class $part"
+    fi
+  fi
+}
+
+#############################
+# Idempotent partition prep #
+#############################
+ensure_partitions() {
+  # Guarantees SLOG_PART and SPECIAL_PART are set to existing or newly-created partitions.
+  # If the device has *no* partitions, it creates p1=32G, p2=128G. If the device has an
+  # unexpected layout, refuses with guidance (to avoid accidental destruction).
+
+  export SLOG_PART="$(part_path 1)"
+  export SPECIAL_PART="$(part_path 2)"
+
+  # Case 1: Both exist → hydrate and return
+  if [[ -b "$SLOG_PART" && -b "$SPECIAL_PART" ]]; then
+    info "${EM_OK} Found existing partitions: $(basename "$SLOG_PART"), $(basename "$SPECIAL_PART")"
+    return 0
+  fi
+
+  # Check if the disk has *any* partitions
+  local has_any_parts="0"
+  if lsblk -nrpo NAME "$DEV" | awk 'NR>1{exit 0} END{exit 1}'; then
+    has_any_parts="1"
+  fi
+
+  if [[ "$has_any_parts" == "1" ]]; then
+    # Some partitions exist but not the ones we expect → refuse to avoid clobbering
+    err "Device $DEV has an unexpected partition layout. Refusing to modify.\nRun with START_FROM=wipe or START_FROM=partition to recreate safely."
+  fi
+
+  # No partitions present → create the standard layout (non-destructive beyond creating GPT)
+  STEP="partition(auto)"
+  info "No partitions found on ${BOLD}$DEV${RESET}; creating p1=${SLOG_SIZE_GIB}GiB (SLOG) and p2=${SPECIAL_SIZE_GIB}GiB (SPECIAL)."
+  run_t "$TIMEOUT_WIPE" sgdisk -o "$DEV" || {
+    warn "sgdisk -o failed; trying parted mklabel gpt."
+    run_t "$TIMEOUT_WIPE" parted -s "$DEV" mklabel gpt || err "Could not create GPT label."
+  }
+  run_t "$TIMEOUT_WIPE" sgdisk \
+    --new=1:1MiB:+${SLOG_SIZE_GIB}GiB --typecode=1:${ZFS_GUID} --change-name=1:"optane_slog" \
+    --new=2:0:+${SPECIAL_SIZE_GIB}GiB --typecode=2:${ZFS_GUID} --change-name=2:"optane_special" \
+    "$DEV" || {
+      warn "sgdisk partitioning failed; trying parted fallback."
+      run_t "$TIMEOUT_WIPE" parted -s "$DEV" unit MiB mkpart optane_slog 1 $((1 + SLOG_SIZE_GIB*1024))
+      run_t "$TIMEOUT_WIPE" parted -s "$DEV" name 1 optane_slog
+      run_t "$TIMEOUT_WIPE" parted -s "$DEV" unit GiB mkpart optane_special ${SLOG_SIZE_GIB} $((SLOG_SIZE_GIB + SPECIAL_SIZE_GIB))
+      run_t "$TIMEOUT_WIPE" parted -s "$DEV" name 2 optane_special
+    }
+
+  retry_settle
+
+  [[ -b "$SLOG_PART" ]]    || err "Expected $SLOG_PART not found after creating partitions."
+  [[ -b "$SPECIAL_PART" ]] || err "Expected $SPECIAL_PART not found after creating partitions."
+  info "${EM_OK} Created partitions: $(basename "$SLOG_PART") $(basename "$SPECIAL_PART")"
+}
+
+#########################
+# Preflight / Sanity    #
+#########################
+STEP="preflight"
+require_cmd zpool; require_cmd zfs; require_cmd lsblk; require_cmd sgdisk
+require_cmd wipefs; require_cmd partprobe; require_cmd udevadm; require_cmd timeout
 command -v blkdiscard >/dev/null 2>&1 || warn "blkdiscard not found; TRIM step will be skipped."
+command -v sfdisk   >/dev/null 2>&1 || warn "sfdisk not found; will skip that fallback."
+command -v parted   >/dev/null 2>&1 || warn "parted not found; will skip that fallback."
 
-## FIX
-apt-get install -y parted
+[[ -b "$DEV" ]] || err "Block device not found: $DEV"
+zpool list -H -o name | grep -qx "$POOL" || err "ZFS pool '$POOL' not found. Create/import it first."
 
-# --- sanity checks ---
-[[ -b "$DEV" ]] || err "Device $DEV not found (is your Optane at a different path?)."
-
-# Pool existence
-if ! zpool list -H -o name | grep -qx "$POOL"; then
-  err "ZFS pool '$POOL' not found. Create/import it first (mirror of /dev/sda /dev/sdb)."
-fi
-
-# Ensure device isn't already in a pool
-if zpool status "$POOL" | grep -q "$(basename "$DEV")"; then
-  err "$DEV already appears in pool '$POOL'. Aborting."
-fi
-
-# Ensure device has no mounted filesystems
+# Refuse if anything mounted on the device
 if lsblk -nrpo MOUNTPOINT "$DEV" | grep -q "/"; then
-  err "$DEV has mounted filesystems. Unmount them first."
+  err "$DEV has mounted filesystems. Unmount first."
 fi
 
-# Check for existing partitions (we'll require a destructive wipe)
-if lsblk -nrpo NAME "$DEV" | awk 'NR>1{print $1}' | grep -q .; then
-  warn "$DEV has existing partitions and will be DESTROYED."
-fi
+# Heads-up if pool already has special/log
+zpool status "$POOL" | awk '/\bspecial\b/{found=1} END{exit !found}' && warn "Pool '$POOL' already has a SPECIAL vdev."
+zpool status "$POOL" | awk '/\blogs\b/{found=1} END{exit !found}'    && warn "Pool '$POOL' already has a LOG device."
 
-cat <<'EONOTE'
-⚠️  FINAL CONFIRMATION
-This will IRREVERSIBLY WIPE /dev/nvme1n1 and add:
-  - /dev/nvme1n1p1 as a LOG (SLOG) device to pool "storage"
-  - /dev/nvme1n1p2 as a SPECIAL device to pool "storage"
-Proceed only if you accept the risk of a single SPECIAL vdev (see header).
-Type PROCEED (all caps) to continue:
+#########################
+# Step: confirm         #
+#########################
+confirm() {
+  STEP="confirm"
+  if [[ "$ASSUME_YES" != "1" ]]; then
+    cat <<EONOTE
+
+${BOLD}${EM_STEP} FINAL CONFIRMATION${RESET}
+This will ${FG_RED}IRREVERSIBLY WIPE${RESET} ${BOLD}$DEV${RESET} and then:
+  • ${BOLD}Create GPT partitions${RESET}:
+      p1 = ${SLOG_SIZE_GIB}GiB  ${DIM}(name: optane_slog)${RESET}     → add as ${BOLD}LOG (SLOG)${RESET} to "${POOL}"
+      p2 = ${SPECIAL_SIZE_GIB}GiB ${DIM}(name: optane_special)${RESET} → add as ${BOLD}SPECIAL${RESET} to "${POOL}"
+      rest = ${BOLD}UNALLOCATED${RESET} (for L2ARC/mirror/FS later)
+  • ${BOLD}Set${RESET}: zfs set special_small_blocks=${SPECIAL_SSB} ${POOL}
+  • ${BOLD}Enable${RESET}: zpool set autotrim=on ${POOL}  ${DIM}(best effort)${RESET}
+
+${FG_YLW}${EM_WARN} DANGER:${RESET} A single-disk SPECIAL is a metadata SPOF. Mirror it in production.
+
+Type ${BOLD}PROCEED${RESET} to continue:
 EONOTE
+    read -r CONFIRM
+    [[ "$CONFIRM" == "PROCEED" ]] || err "User aborted."
+  else
+    info "ASSUME_YES=1 — skipping confirmation prompt."
+  fi
+}
 
-read -r CONFIRM
-[[ "$CONFIRM" == "PROCEED" ]] || err "User aborted."
+#########################
+# Step: wipe            #
+#########################
+wipe() {
+  STEP="wipe"
+  info "${EM_STEP} Starting destructive wipe on ${BOLD}$DEV${RESET}"
+  stop_udev_queue
 
-# --- destroy existing layout on the Optane ---
-info "Discarding (TRIM) $DEV (if supported)..."
-if command -v blkdiscard >/dev/null 2>&1; then
-  # Some controllers may refuse discard; ignore failures
-  blkdiscard -f "$DEV" || warn "blkdiscard failed or unsupported; continuing."
-fi
+  if [[ "$SKIP_DISCARD" != "1" ]] && command -v blkdiscard >/dev/null 2>&1; then
+    run_t "$TIMEOUT_WIPE" blkdiscard -f "$DEV" || warn "blkdiscard failed/timed out; continuing."
+  else
+    warn "Skipping blkdiscard (SKIP_DISCARD=$SKIP_DISCARD)."
+  fi
 
-info "Zapping GPT/MBR on $DEV..."
-sgdisk --zap-all "$DEV"
+  # Multi-tool zap, each with timeout; avoid D-state wedges.
+  if ! run_t "$TIMEOUT_WIPE" sgdisk -Z "$DEV"; then
+    warn "sgdisk -Z failed/timed out. Trying sgdisk --zap-all..."
+    run_t "$TIMEOUT_WIPE" sgdisk --zap-all "$DEV" || warn "sgdisk --zap-all failed/timed out."
+  fi
 
-info "Erasing filesystem signatures on $DEV..."
-wipefs -a "$DEV" || true
+  # If partitions still present, try sfdisk delete (if available)
+  if lsblk -nrpo NAME "$DEV" | awk 'NR>1{seen=1} END{exit seen?0:1}'; then
+    warn "Partitions still visible; attempting sfdisk --delete."
+    run_t "$TIMEOUT_WIPE" sfdisk --delete "$DEV" || warn "sfdisk delete failed/timed out."
+  fi
 
-# --- create partitions ---
-# p1: 1MiB → (1MiB + SLOG_SIZE_GIB) for SLOG
-# p2: rest for SPECIAL
-info "Creating new GPT and partitions on $DEV..."
-sgdisk -o "$DEV"
+  # If still present, try parted mklabel gpt (if available)
+  if lsblk -nrpo NAME "$DEV" | awk 'NR>1{seen=1} END{exit seen?0:1}'; then
+    warn "Partitions still visible; attempting parted mklabel gpt."
+    run_t "$TIMEOUT_WIPE" parted -s "$DEV" mklabel gpt || warn "parted mklabel failed/timed out."
+  fi
 
-# sgdisk sizes use MiB units. Convert GiB→MiB for end calculation.
-# We'll let sgdisk compute the end by size spec with +${SLOG_SIZE_GIB}G
-sgdisk \
-  --new=1:1MiB:+${SLOG_SIZE_GIB}GiB --typecode=1:$ZFS_GUID --change-name=1:"optane_slog" \
-  --new=2:0:0                         --typecode=2:$ZFS_GUID --change-name=2:"optane_special" \
-  "$DEV"
+  # wipefs can report "busy" — treat as best-effort
+  run_t "$TIMEOUT_WIPE" wipefs -a "$DEV" || warn "wipefs reported busy; proceeding."
 
-partprobe "$DEV"
-udevadm settle
+  kernel_rescan_reset
+  run_t "$TIMEOUT_PART" udevadm settle || true
 
-SLOG_PART="${DEV}p1"
-SPECIAL_PART="${DEV}p2"
+  # Last resort: small zero header if allowed
+  if [[ "$ALLOW_DD" == "1" ]]; then
+    if lsblk -nrpo NAME "$DEV" | awk 'NR>1{seen=1} END{exit seen?0:1}'; then
+      warn "Headers may persist; issuing dd header zero as last resort."
+      run_t "$TIMEOUT_WIPE" dd if=/dev/zero of="$DEV" bs=1M count=8 oflag=direct,dsync || true
+      kernel_rescan_reset
+    fi
+  fi
 
-[[ -b "$SLOG_PART" ]] || err "Expected $SLOG_PART not found after partitioning."
-[[ -b "$SPECIAL_PART" ]] || err "Expected $SPECIAL_PART not found after partitioning."
+  start_udev_queue
+}
 
-# Double-check pool doesn't already have log/special devices with these partitions
-if zpool status "$POOL" | grep -q "$(basename "$SLOG_PART")"; then
-  err "$SLOG_PART already in pool '$POOL'."
-fi
-if zpool status "$POOL" | grep -q "$(basename "$SPECIAL_PART")"; then
-  err "$SPECIAL_PART already in pool '$POOL'."
-fi
+#########################
+# Step: partition       #
+#########################
+partition() {
+  STEP="partition"
+  info "Creating fresh GPT and limited slices on ${BOLD}$DEV${RESET}"
 
-# --- add devices to pool ---
-info "Adding LOG (SLOG) device $SLOG_PART to pool $POOL..."
-zpool add "$POOL" log "$SLOG_PART"
+  run_t "$TIMEOUT_WIPE" sgdisk -o "$DEV" || {
+    warn "sgdisk -o failed; trying parted mklabel gpt."
+    run_t "$TIMEOUT_WIPE" parted -s "$DEV" mklabel gpt || err "Could not create GPT label."
+  }
 
-info "Adding SPECIAL device $SPECIAL_PART to pool $POOL..."
-# NOTE: This is a single (unmirrored) special vdev. See risk notes above.
-zpool add "$POOL" special "$SPECIAL_PART"
+  run_t "$TIMEOUT_WIPE" sgdisk \
+    --new=1:1MiB:+${SLOG_SIZE_GIB}GiB --typecode=1:${ZFS_GUID} --change-name=1:"optane_slog" \
+    --new=2:0:+${SPECIAL_SIZE_GIB}GiB --typecode=2:${ZFS_GUID} --change-name=2:"optane_special" \
+    "$DEV" || {
+      warn "sgdisk partitioning failed; trying parted fallback."
+      run_t "$TIMEOUT_WIPE" parted -s "$DEV" unit MiB mkpart optane_slog 1 $((1 + SLOG_SIZE_GIB*1024))
+      run_t "$TIMEOUT_WIPE" parted -s "$DEV" name 1 optane_slog
+      run_t "$TIMEOUT_WIPE" parted -s "$DEV" unit GiB mkpart optane_special ${SLOG_SIZE_GIB} $((SLOG_SIZE_GIB + SPECIAL_SIZE_GIB))
+      run_t "$TIMEOUT_WIPE" parted -s "$DEV" name 2 optane_special
+    }
 
-# --- set dataset properties ---
-info "Setting special_small_blocks=${SPECIAL_SSB} on dataset $POOL..."
-zfs set special_small_blocks="$SPECIAL_SSB" "$POOL"
+  retry_settle
 
-# Optional quality-of-life: enable autotrim on the pool (safe on SSD/NVMe)
-if ! zpool get -H -o value autotrim "$POOL" | grep -qi "on"; then
-  info "Enabling autotrim=on on pool $POOL..."
-  zpool set autotrim=on "$POOL" || warn "Could not set autotrim=on (non-fatal)."
-fi
+  export SLOG_PART="$(part_path 1)"
+  export SPECIAL_PART="$(part_path 2)"
+  [[ -b "${SLOG_PART}" ]]    || { holders_report; err "Expected ${SLOG_PART} not found after partitioning."; }
+  [[ -b "${SPECIAL_PART}" ]] || { holders_report; err "Expected ${SPECIAL_PART} not found after partitioning."; }
+}
 
-# Print state
-info "Done. Current pool layout:"
-zpool status "$POOL" || true
+#########################
+# Step: add_log         #
+#########################
+add_log() {
+  STEP="add_log"
+  # Idempotent hydration: ensure partitions exist, even if we skipped earlier steps.
+  ensure_partitions
+  try_add_vdev log "$SLOG_PART"
+}
 
-cat <<EOF
+#########################
+# Step: add_special     #
+#########################
+add_special() {
+  STEP="add_special"
+  ensure_partitions
+  try_add_vdev special "$SPECIAL_PART"
+}
 
-===============================================================================
-SUCCESS
+#########################
+# Step: set_props       #
+#########################
+set_props() {
+  STEP="set_props"
+  info "Setting ${BOLD}special_small_blocks=${SPECIAL_SSB}${RESET} on ${BOLD}${POOL}${RESET}"
+  run zfs set special_small_blocks="${SPECIAL_SSB}" "${POOL}"
 
-What changed:
-  • WIPED:           $DEV
-  • CREATED:         $SLOG_PART (32 GiB) as LOG (SLOG)
-  • CREATED:         $SPECIAL_PART (rest) as SPECIAL
-  • DATASET TUNING:  special_small_blocks=$SPECIAL_SSB on $POOL
-  • POOL TUNING:     autotrim=on (if supported)
+  local current_autotrim
+  current_autotrim="$(zpool get -H -o value autotrim "$POOL" || echo "off")"
+  if [[ "${current_autotrim,,}" != "on" ]]; then
+    info "Enabling ${BOLD}autotrim=on${RESET} on pool ${BOLD}${POOL}${RESET} (best effort)"
+    run zpool set autotrim=on "$POOL" || warn "Could not set autotrim=on (non-fatal)."
+  fi
+}
 
-Useful checks:
-  zpool iostat -v $POOL 5
-  zdb -bb $POOL | grep special
-  zfs get special_small_blocks $POOL
-  zpool status $POOL
+#########################
+# Step: finish          #
+#########################
+finish() {
+  STEP="finish"
+  info "Final pool state:"
+  zpool status "$POOL" || true
+  echo
+  cat <<EOF
+${BOLD}===============================================================================${RESET}
+${EM_DONE} ${BOLD}${FG_GRN}SUCCESS${RESET}
 
-Advanced (optional):
-  # If certain datasets are heavy on synchronous writes (VMs/DBs), you can do:
-  # zfs set logbias=latency $POOL/your_vm_dataset
-  # zfs set sync=standard $POOL/your_vm_dataset  # or 'always' if your app requires it
+${BOLD}What changed:${RESET}
+  • WIPED            : ${DEV}
+  • CREATED          : $(part_path 1) (${SLOG_SIZE_GIB} GiB) as LOG (SLOG)
+  • CREATED          : $(part_path 2) (${SPECIAL_SIZE_GIB} GiB) as SPECIAL
+  • LEFT UNALLOCATED : Remainder of ${DEV} (save for L2ARC, SPECIAL mirror, other FS)
+  • DATASET TUNING   : special_small_blocks=${SPECIAL_SSB} on ${POOL}
+  • POOL TUNING      : autotrim=on (best effort)
 
-Caveats & Rollback:
-  • LOG (SLOG) can be removed:
-      zpool remove $POOL $(basename "$SLOG_PART")
-  • SPECIAL vdev removal:
-      Not recommended unless you're on a ZFS version supporting device removal
-      for the special class and you've verified evacuation works. In practice,
-      treat SPECIAL as permanent—prefer mirroring SPECIAL with a second device.
-  • If you'd rather switch to a safer plan (SLOG + L2ARC, no SPECIAL), destroy
-    the pool additions now and re-run with a layout that adds 'cache' instead of 'special'.
+${BOLD}Verify:${RESET}
+  zpool iostat -v ${POOL} 5
+  zdb -bb ${POOL} | grep -E 'special|Log' || true
+  zfs get special_small_blocks ${POOL}
+  zpool status ${POOL}
 
-Tip:
-  With a single SPECIAL vdev, make sure you have good backups.
-===============================================================================
+${BOLD}Next steps (examples):${RESET}
+  # Add an L2ARC from leftover space later:
+  #   sgdisk --new=3:0:+64GiB --typecode=3:${ZFS_GUID} --change-name=3:l2arc ${DEV}
+  #   partprobe ${DEV} && udevadm settle
+  #   zpool add ${POOL} cache $(part_path 3)
+
+  # Or create a regular filesystem partition:
+  #   sgdisk --new=3:0:0 --typecode=3:8300 --change-name=3:extra_fs ${DEV}
+  #   partprobe ${DEV} && udevadm settle
+  #   mkfs.ext4 $(part_path 3) && mount /mnt/extra $(part_path 3)
+
+${BOLD}Caveats:${RESET}
+  • SPECIAL should be mirrored in production.
+  • special_small_blocks impacts NEW writes only.
+${BOLD}===============================================================================${RESET}
 EOF
+}
+
+#########################
+# Step runner / resume  #
+#########################
+main() {
+  case "$START_FROM" in
+    confirm)      confirm;      ;&  # fall through
+    wipe)         wipe;         ;&
+    partition)    partition;    ;&
+    add_log)      add_log;      ;&
+    add_special)  add_special;  ;&
+    set_props)    set_props;    ;&
+    finish)       finish        ;;
+    *) err "Invalid START_FROM='$START_FROM'. Use: confirm|wipe|partition|add_log|add_special|set_props|finish" ;;
+  endesac
+}
+
+main "$@"

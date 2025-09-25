@@ -5,17 +5,16 @@
 #  Purpose:
 #    One import for all shared functionality so individual scripts stay tiny.
 #    Covers:
-#      • Context init (slug, XDG, journald tag, log files), TZ=America/New_York
-#      • TTY-aware styled logging + optional NDJSON/JSON logs + journald
+#      • Context init (slug, XDG; root → /etc,/var/lib,/var/cache), TZ=America/New_York
+#      • TTY-aware styled logging + optional JSON logs + journald
 #      • Secret masking in logs, plain log file with rotation (10MB, keep 5)
 #      • Command runner with confirm / dry-run
-#      • One-object NDJSON run summary for AI recursion (steps OK/FAIL)
-#      • Healthchecks start/success/fail with 1MB payload cap
-#      • Self-update from URL → stage under /usr/local/lib/<slug>/<ts>-<sha8> →
-#        atomic symlink /usr/local/bin/<slug> → keep last 3 → rollback on failure
-#      • Update URL persistence in XDG, slug derivation from update URL
+#      • NDJSON run summary (OK/FAIL per step)
+#      • Healthchecks start/success/fail with log streaming (1MB guard)
+#      • Self-update from URL → stage /usr/local/lib/<slug>/<ts>-<sha8> → atomic symlink
+#      • Update URL persistence in XDG
 #      • Dependency bootstrap (apt/dnf/apk/pacman/brew) with --no-sudo support
-#      • Config encrypt/decrypt (OpenSSL AES-256-GCM PBKDF2; PSK noted)
+#      • Config encrypt/decrypt (OpenSSL AES-256-GCM PBKDF2; fallback CBC)
 #      • Interactive recovery shell (vim, 15-min inactivity timeout)
 #      • Helpers for ordered step execution and START_FROM gating
 #
@@ -29,19 +28,23 @@
 
 : "${SE_TZ:=America/New_York}"         # Human-facing timestamps timezone
 : "${SE_COLOR_MODE:=auto}"             # auto|always|never
-: "${DEBUG:=0}"                        # 0|1 (human DEBUG sections controlled by caller)
+: "${DEBUG:=0}"                        # 0|1
 : "${CONFIRM_COMMAND:=0}"              # 0|1 (prompt before commands)
 : "${DRY_RUN:=0}"                      # 0|1 (skip execution)
 : "${ENCRYPT_CONFIG:=1}"               # 0|1 (config encryption on/off)
 : "${SE_JSON_LOGS:=0}"                 # 0|1 (also emit JSON logs to stdout)
 : "${NO_SUDO:=0}"                      # 0|1 (disallow sudo)
-: "${HEALTHCHECKS_BASE:=https://healthchecks.megabyte.space}"
-: "${HEALTHCHECKS_URL:=}"              # full URL or base
-: "${HEALTHCHECKS_PING_KEY:=}"         # when only base is given
-: "${SE_LOG_MAX_BYTES:=10485760}"      # 10MB
-: "${SE_LOG_KEEP:=5}"                  # keep 5 rotated logs
 
-# Pre-shared key for encryption (security through obfuscation, per spec).
+: "${HEALTHCHECKS_BASE:=https://healthchecks.megabyte.space}"  # default base
+: "${HEALTHCHECKS_URL:=}"             # full URL (preferred) or base; config.json fallback supported
+: "${HEALTHCHECKS_PING_KEY:=}"        # used only if base+key building is needed
+
+: "${SE_LOG_MAX_BYTES:=10485760}"     # 10MB rotation threshold
+: "${SE_LOG_KEEP:=5}"                  # keep 5 rotated logs
+: "${SE_HC_TAIL_LINES:=3000}"         # lines to POST on success
+: "${SE_HC_TAIL_LINES_FAIL:=300}"     # lines to POST on failure
+
+# Pre-shared key for encryption (security-through-obscurity, per spec).
 SE_PSK="Angry-Aggressive-Alien-Avatar-Angel-Aardvark"
 
 # Exit codes map (common)
@@ -56,17 +59,18 @@ SE__IS_TTY=0
 SE__USE_COLOR=1
 SE__C_RESET='' SE__C_BOLD='' SE__C_DIM='' SE__C_RED='' SE__C_YELLOW='' SE__C_BLUE='' SE__C_CYAN='' SE__C_GRAY=''
 
-SE__SLUG=""              # derived from update URL or provided by caller
+SE__SLUG=""              # derived/provided by caller
 SE__UPDATE_URL=""        # update URL persisted in XDG
 SE__XDG_CONFIG="" SE__XDG_STATE="" SE__XDG_CACHE=""
-SE__LOG_DIR=""           # ${XDG_STATE}/logs
+SE__LOG_DIR=""           # ${STATE}/logs
 SE__LOG_FILE=""          # ${LOG_DIR}/current.log
-SE__NDJSON_FILE=""       # ${XDG_STATE}/last-run.ndjson
+SE__NDJSON_FILE=""       # ${STATE}/last-run.ndjson
 SE__JOURNAL_TAG=""       # tag for systemd-cat
 SE__HAS_SYSTEMD_CAT=0
 
 SE__STEPS_JSON=""        # buffer for NDJSON steps
 SE__FAILED_STEP=""       # name of first failed step (for NDJSON)
+SE__HC_URL_CACHED=""     # cached Healthchecks URL (so traps don’t lose it)
 
 # ------------------------------ Small Helpers ---------------------------------
 
@@ -102,16 +106,18 @@ se_short_sha256_file() {
   elif se__is_cmd shasum; then
     shasum -a 256 "$f" | awk '{print substr($1,1,8)}'
   else
-    # openssl output: "SHA256(file)= <hash>"
     openssl dgst -sha256 "$f" | awk '{print substr($NF,1,8)}'
   fi
 }
 
-se_xdg_config_dir() { printf '%s/%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}" "$1"; }
-se_xdg_state_dir()  { printf '%s/%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}" "$1"; }
-se_xdg_cache_dir()  { printf '%s/%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}" "$1"; }
+# XDG dirs: root → system paths; non-root → standard XDG
+_se_is_root() { [[ ${EUID:-$(id -u)} -eq 0 ]]; }
+se_xdg_config_dir() { _se_is_root && printf '/etc/%s\n' "$1" || printf '%s/%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}" "$1"; }
+se_xdg_state_dir()  { _se_is_root && printf '/var/lib/%s\n' "$1" || printf '%s/%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}" "$1"; }
+se_xdg_cache_dir()  { _se_is_root && printf '/var/cache/%s\n' "$1" || printf '%s/%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}" "$1"; }
+se_xdg_config_file(){ printf '%s/%s' "$(se_xdg_config_dir "$1")" "$2"; }
 
-se_mkdir_p() { mkdir -p "$1"; }
+se_mkdir_p() { mkdir -p "$@" 2>/dev/null || mkdir -p "$@"; }
 
 # Atomic write from stdin → tmp → rename
 se_atomic_write() {
@@ -119,8 +125,7 @@ se_atomic_write() {
   tmp="$(dirname "$dst")/.tmp.$(basename "$dst").$$.$RANDOM"
   umask 022
   if ! cat >"$tmp"; then rm -f "$tmp"; return 1; fi
-  # fsync best-effort
-  if se__is_cmd sync; then sync >/dev/null 2>&1 || true; fi
+  se__is_cmd sync && sync >/dev/null 2>&1 || true
   mv -f "$tmp" "$dst"
 }
 
@@ -150,7 +155,7 @@ se__detect_tty_and_color() {
     SE__C_RED=$'\033[31m'; SE__C_YELLOW=$'\033[33m'; SE__C_BLUE=$'\033[34m'
     SE__C_CYAN=$'\033[36m'; SE__C_GRAY=$'\033[90m'
   else
-    SE__C_RESET=''; SE__C_BOLD=''; SE__C_DIM=''; SE__C_RED=''; SE__C_YELLOW=''; SE__C_BLUE=''; SE__C_CYAN=''; SE__C_GRAY=''
+    SE__C_RESET='' SE__C_BOLD='' SE__C_DIM='' SE__C_RED='' SE__C_YELLOW='' SE__C_BLUE='' SE__C_CYAN='' SE__C_GRAY=''
   fi
   se__is_cmd systemd-cat && SE__HAS_SYSTEMD_CAT=1 || SE__HAS_SYSTEMD_CAT=0
 }
@@ -162,7 +167,6 @@ se__log_prefix() { printf '[%s] ' "$(se_now_ny)"; }
 # Mask simple secrets by replacing values of envs ending with KEY|TOKEN|SECRET|PASSWORD
 se_mask_line() {
   local line="$1" k v
-  # shellcheck disable=SC2034
   while IFS='=' read -r k v; do
     [[ "$k" =~ (_KEY|_TOKEN|_SECRET|_PASSWORD)$ ]] || continue
     [[ -n "$v" ]] || continue
@@ -183,7 +187,6 @@ PY
     perl -MJSON::PP -e 'print JSON::PP->new->allow_nonref->encode($ARGV[0])' "$s"
     return 0
   fi
-  # Fallback minimal escape
   printf '%s' "$s" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e 's/\r/\\r/g' -e 's/\n/\\n/g' | sed -e 's/^/"/' -e 's/$/"/'
 }
 
@@ -216,7 +219,6 @@ se__maybe_rotate_log() {
     local rotated="${SE__LOG_DIR}/log-${ts}.log"
     mv -f "$f" "$rotated"
     : >"$f"
-    # Keep last N rotated files
     se_keep_last_n "$SE__LOG_DIR" "log-*.log" "$SE_LOG_KEEP"
   fi
 }
@@ -244,7 +246,6 @@ se_log() {
     DEBUG) colored="${SE__C_GRAY}${raw}${SE__C_RESET}" ;;
     *)     ;;
   esac
-  # Mask + print human
   local masked; masked="$(se_mask_line "$colored")"
   local human="${prefix}[${level}] ${masked}"
   if [[ "$level" == "ERROR" || "$level" == "FATAL" ]]; then
@@ -252,11 +253,8 @@ se_log() {
   else
     printf '%s\n' "$human"
   fi
-  # Write plain to file (uncolored, masked)
   se__append_log_file "${prefix}[${level}] $(se_mask_line "$raw")"
-  # Journald
   se__journal_send "$level" "$(se_mask_line "$raw")"
-  # Optional JSON to stdout
   se__emit_json_log "$level" "$raw"
 }
 se_log_cmd()   { se_log CMD "$*"; }
@@ -268,9 +266,8 @@ se_log_debug() { [[ "$DEBUG" == "1" || "$DEBUG" == "true" ]] && se_log DEBUG "$*
 
 # --------------------- Confirm / Dry-run / Command Exec -----------------------
 
-se_confirm() { local p="${1:-Proceed? [y/N]}"; local a; read -r -p "$p " a || return 1; [[ "$a" =~ ^[Yy]$ ]]; }
+se_confirm() { local p="${1:-Proceed? [y/N]}"; local a; read -r -p "$p " a || return 1; [[ "$a" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; }
 
-# se_cmd echo hello
 se_cmd() {
   local cmd=("$@")
   se_log_cmd "${cmd[*]}"
@@ -319,8 +316,6 @@ se_ndjson_finalize() {
 }
 
 # Execute ordered steps with START_FROM gate.
-# Usage: se_run_steps "step_10_setup" "step_20_sync" ...
-# Env: START_FROM can be a function name to begin at.
 se_run_steps() {
   local start="${START_FROM:-}" fname
   local started=0 rc=0
@@ -345,40 +340,86 @@ se_run_steps() {
 
 # ------------------------------- Healthchecks ---------------------------------
 
+# Build & cache the Healthchecks URL:
+# 1) Use $HEALTHCHECKS_URL if set (verbatim)
+# 2) Else read from config.json (.HEALTHCHECKS_URL)
+# 3) Else if HEALTHCHECKS_BASE + HEALTHCHECKS_PING_KEY present → base/ping/key/<slug>?create=1
+# 4) Else empty (no-op pings)
 se__hc_build_url() {
   local slug="$1"
+  [[ -n "$SE__HC_URL_CACHED" ]] && { printf '%s\n' "$SE__HC_URL_CACHED"; return 0; }
+
   local u="${HEALTHCHECKS_URL:-}"
-  if [[ -z "$u" && -n "$HEALTHCHECKS_BASE" && -n "$HEALTHCHECKS_PING_KEY" ]]; then
-    printf '%s/ping/%s/%s?create=1\n' "${HEALTHCHECKS_BASE%/}" "$HEALTHCHECKS_PING_KEY" "$slug"
-    return 0
+  if [[ -z "$u" ]]; then
+    # config.json fallback
+    local cfg; cfg="$(se_config_read "$slug")"
+    u="$(printf '%s' "$cfg" | { command -v jq >/dev/null 2>&1 && jq -r '.HEALTHCHECKS_URL // empty' || grep -o 'HEALTHCHECKS_URL' >/dev/null; })"
+    if ! [[ "$u" =~ ^https?:// ]]; then
+      # crude fallback if jq not available or value not found
+      u=""
+    fi
   fi
+
+  if [[ -z "$u" && -n "$HEALTHCHECKS_BASE" && -n "$HEALTHCHECKS_PING_KEY" ]]; then
+    u="${HEALTHCHECKS_BASE%/}/ping/${HEALTHCHECKS_PING_KEY}/${slug}?create=1"
+  fi
+
+  SE__HC_URL_CACHED="$u"
   printf '%s\n' "$u"
 }
 
+# Guard note payloads to <= 1MB (best-effort)
 se__size_over_1mb() {
   local s; s=$(wc -c <<<"$1" | awk '{print $1}')
-  (( s > 1048576 )) && return 0 || return 1
+  (( s > 1048576 ))
 }
 
+# Low-level ping; if $2 is provided and <=1MB, send as --data-raw, else GET.
 se_hc_ping() {
   local url="$1" note="$2"
   [[ -z "$url" ]] && return 0
-  if [[ -n "$note" ]] && se__size_over_1mb "$note"; then
-    note=""
-    se_log_warn "Healthchecks note >1MB; skipping payload."
-  end_if=
-  fi
   se__is_cmd curl || return 0
+  if [[ -n "$note" ]] && se__size_over_1mb "$note"; then
+    se_log_warn "Healthchecks note >1MB; skipping payload."
+    note=""
+  fi
   if [[ -n "$note" ]]; then
-    curl -fsS -m 10 --retry 3 --retry-all-errors --data-binary "$note" "$url" >/dev/null 2>&1 || true
+    curl -fsS -m 10 --retry 3 --retry-all-errors --data-raw "$note" "$url" >/dev/null 2>&1 || true
   else
     curl -fsS -m 10 --retry 3 --retry-all-errors "$url" >/dev/null 2>&1 || true
   fi
 }
 
-se_hc_start()   { se_hc_ping "$1" "start $(se_now_ny)"; }
-se_hc_success() { se_hc_ping "$1" "success $(se_now_ny)"; }
-se_hc_fail()    { se_hc_ping "$1" "fail $(se_now_ny)"; }
+# Start → POST simple note to /start
+se_hc_start() {
+  local url="$1"; [[ -z "$url" ]] && return 0
+  se_log_info "Healthchecks start → ${url%/}/start"
+  curl -fsS -m 10 --retry 3 --retry-all-errors --data-raw "start $(se_now_ny)" "${url%/}/start" >/dev/null 2>&1 || true
+}
+
+# Success → post a generous tail of the current log to base URL
+se_hc_success() {
+  local url="$1" log="${SE__LOG_FILE:-}"
+  [[ -z "$url" ]] && return 0
+  se_log_info "Healthchecks success → $url (posting last ${SE_HC_TAIL_LINES} lines)"
+  if [[ -n "$log" && -r "$log" ]]; then
+    tail -n "${SE_HC_TAIL_LINES}" "$log" | curl -fsS -m 10 --retry 3 --data-binary @- "$url" >/dev/null 2>&1 || true
+  else
+    curl -fsS -m 10 --retry 3 --retry-all-errors --data-raw "ok $(se_now_ny)" "$url" >/dev/null 2>&1 || true
+  fi
+}
+
+# Fail → post a shorter tail to /fail
+se_hc_fail() {
+  local url="$1" log="${SE__LOG_FILE:-}"
+  [[ -z "$url" ]] && return 0
+  se_log_warn "Healthchecks fail → ${url%/}/fail (posting last ${SE_HC_TAIL_LINES_FAIL} lines)"
+  if [[ -n "$log" && -r "$log" ]]; then
+    tail -n "${SE_HC_TAIL_LINES_FAIL}" "$log" | curl -fsS -m 10 --retry 3 --data-binary @- "${url%/}/fail" >/dev/null 2>&1 || true
+  else
+    curl -fsS -m 10 --retry 3 --retry-all-errors --data-raw "fail $(se_now_ny)" "${url%/}/fail" >/dev/null 2>&1 || true
+  fi
+}
 
 # ------------------------------- Self-Update ----------------------------------
 
@@ -496,7 +537,7 @@ se_ensure_cmds() {
 
 # ------------------------- Config Encryption (OpenSSL) ------------------------
 
-# Try AES-256-GCM PBKDF2; if not supported (older LibreSSL), fall back to AES-256-CBC PBKDF2.
+# Try AES-256-GCM PBKDF2; fallback to AES-256-CBC PBKDF2 if needed.
 se__openssl_enc() {
   local mode="$1" in="$2" out="$3" dec="${4:-0}"
   local algo_gcm=(enc -aes-256-gcm -pbkdf2 -iter 200000 -salt)
@@ -588,6 +629,9 @@ se_init_context() {
   SE__LOG_FILE="$SE__LOG_DIR/current.log"
 
   se_ndjson_init "$slug"
+
+  # cache HC URL early (so EXIT traps still have it)
+  SE__HC_URL_CACHED="$(se__hc_build_url "$slug")"
 }
 
 # ------------------------------- CI Detection ---------------------------------

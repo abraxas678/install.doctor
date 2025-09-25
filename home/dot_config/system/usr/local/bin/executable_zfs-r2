@@ -1,728 +1,454 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash
 # ==============================================================================
-# zfs-r2 — ZFS → Cloudflare R2 snapshots & synchronization (installer + runner)
-#
-# ── Purpose ───────────────────────────────────────────────────────────────────
-# • This tool TAKES SNAPSHOTS and SYNCHRONIZES artifacts with R2. It does not restore.
-# • On `run`:
-#     1) Validate rclone & credentials.
-#     2) Gap-fill: download any MISSING objects from R2 → /var/lib/vz/dump     (no deletes)
-#     3) Gap-fill: upload any NEW files    from /var/lib/vz/dump → R2          (no deletes)
-#     4) For each dataset in BACKUP_DATASETS:
-#          - Create snapshot TAG+timestamp.
-#          - For **rpool**:
-#              * If /var/lib/vz/dump/rpool.full.zst exists → create INCREMENTAL to dump + upload.
-#              * If it’s missing → **fail** (policy: baseline only via `install` or `baseline`).
-#            For **other datasets**:
-#              * If no baseline in dump → create FULL now + upload; else create INCR + upload.
-#
-# • On `install`: writes /etc/zfs-r2.conf, rclone.conf, systemd timer, validates access,
-#   and creates **rpool FULL baseline** in /var/lib/vz/dump (then uploads it).
-#
-# • On `baseline`: creates full baseline(s) for specified or all datasets into dump and uploads.
-#
-# • On `sync-writelock`: manually syncs /write-lock → R2 (separate command; not part of `run`).
-#
-# ── Object layout on R2 (no log uploads) ───────────────────────────────────────
-#   s3://{R2_BUCKET}/{R2_PREFIX}/host={HOST}/dataset={DATASET}/
-#       {DATASET}.full.zst
-#       {DATASET}.{YYYYmmdd-HHMMSS}.incr.zst
-#
-# ── Logs (local only) ─────────────────────────────────────────────────────────
-#   Saved on the host at LOG_DIR (default: /var/log/zfs-r2) as run-*.log.
-#
-# ── Install ───────────────────────────────────────────────────────────────────
-#   R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=… /usr/local/bin/zfs-r2 install
-#
-# ── Run now ───────────────────────────────────────────────────────────────────
-#   /usr/local/bin/zfs-r2 run
-#
-# ── Create/repair full baseline(s) ────────────────────────────────────────────
-#   /usr/local/bin/zfs-r2 baseline
-#   /usr/local/bin/zfs-r2 baseline rpool rpool/data
-#
-# ── Sync /write-lock (manual) ─────────────────────────────────────────────────
-#   /usr/local/bin/zfs-r2 sync-writelock
-#
+#  zfs-r2 — Proxmox rpool FULL backup → Cloudflare R2
 # ------------------------------------------------------------------------------
-# @requires   zfs, rclone, zstd, curl, pv, flock
+#  Design (crash-consistent, no Proxmox VM snapshots):
+#    1) Single pool-wide snapshot: rpool@r2sync-<YYYYmmdd-HHMMSS>
+#    2) Stream with `zfs send -R` → compress to single .zst in state/dump
+#    3) Destroy snapshot **immediately after local dump completes**
+#    4) Verify by full decompression locally
+#    5) Upload to Cloudflare R2 atomically: .partial → moveto final
+#    6) Healthchecks: /start on begin; post logs on success or /fail
 #
-# === Environment (defaults preserved from original where applicable) ==========
-# Cloud / R2:
-# @env R2_ACCESS_KEY_ID          Cloudflare R2 Access Key ID. (*required on install*)
-# @env R2_SECRET_ACCESS_KEY      Cloudflare R2 Secret Access Key. (*required on install*)
-# @env R2_BUCKET                 R2 bucket name. Default: zfs
-# @env R2_PREFIX                 Optional prefix/folder inside bucket (e.g., "proxmox01"). Default: empty
-# @env R2_ENDPOINT               S3 endpoint URL. Default: R2_ENDPOINT_DEFAULT
-# @env R2_ENDPOINT_DEFAULT       Default endpoint. Default: https://84fa0d1b16ff8086dd958c468ce7fd59.r2.cloudflarestorage.com
-# @env R2_ACCOUNT_ID             Optional; informational or for building endpoint externally.
+#  Commands:
+#    install      Initialize/OVERWRITE config & state; prompts for missing env
+#    run          Execute backup now (default)
+#    debug        Verbose run; `CONFIRM_COMMAND=1` to confirm each command
+#    uninstall    Remove XDG config/state/cache
+#    self-update  Update from UPDATE_URL (must be set)
+#    recover      Recovery shell (15-min inactivity auto-exit)
+#    help         Show help and environment reference
 #
-# Datasets / schedule:
-# @env BACKUP_DATASETS           Space-separated list (e.g., "rpool rpool/data"). Default: rpool
-# @env BACKUP_SCHEDULE           systemd OnCalendar (e.g., "03:15"). Default: 03:15
-# @env LOCAL_RETENTION_DAYS      Days to keep local snapshots created by this tool. Default: 14
+#  Key paths (root):
+#    Config JSON : /etc/zfs-r2/config.json[.enc]
+#    State dir   : /var/lib/zfs-r2
+#    Cache dir   : /var/cache/zfs-r2
+#    Dump dir    : /var/lib/zfs-r2/dump
+#    Logs dir    : /var/lib/zfs-r2/logs (current.log, rotated)
+#    rclone.conf : /etc/zfs-r2/rclone.conf
 #
-# Compression:
-# @env ZSTD_LEVEL                zstd compression level. Default: 19
-#
-# rclone:
-# @env RCLONE_REMOTE_NAME        rclone remote section name. Default: proxmox-backups
-# @env RCLONE_CONFIG_DIR         rclone config directory. Default: /root/.config/rclone
-# @env RCLONE_BWLIMIT            rclone --bwlimit. Default: 100M
-# @env RCLONE_CHUNK_SIZE         rclone s3 chunk size. Default: 128M
-# @env RCLONE_EXTRA_ARGS         Extra args for rclone (e.g., --s3-upload-concurrency=8)
-#
-# Healthchecks:
-# @env HEALTHCHECKS_URL          Healthchecks ping URL. Default:
-#                                https://healthchecks.megabyte.space/ping/csjKSM11DRvU5ZjHMmYxYg/zfs-r2
-#
-# Write-lock:
-# @env SYNC_WRITELOCK            1=allow sync-writelock operation, 0=disable. Default: 1
-# @env WRITELOCK_DIR             Local path of write-lock artifacts. Default: /write-lock
-#
-# Legacy/compat (kept as defaults though not used in this sync-only tool):
-# @env KEEP_INCR_R2              Retention count for incrementals on R2 (unused; never delete). Default: 60
-# @env RESTORE_TARGET_POOL       Legacy restore target pool (unused). Default: rpool
-# @env RUN_PARANOID_SCRUB        1=scrub pools before run; 0=skip. Default: 0
+#  Healthchecks default:
+#    https://healthchecks.megabyte.space/ping/csjKSM11DRvU5ZjHMmYxYg/zfs-r2
 # ==============================================================================
 
-set -Eeuo pipefail
-
 # ──────────────────────────────────────────────────────────────────────────────
-# Defaults (full surface, including legacy values)
+# Shell Expert library bootstrap (source.sh)
 # ──────────────────────────────────────────────────────────────────────────────
-RCLONE_REMOTE_NAME="${RCLONE_REMOTE_NAME:-proxmox-backups}"
-RCLONE_CONFIG_DIR="${RCLONE_CONFIG_DIR:-/root/.config/rclone}"
-RCLONE_CONF="${RCLONE_CONFIG_DIR}/rclone.conf"
-
-STATE_DIR="${STATE_DIR:-/var/lib/zfs-r2}"
-LOCK_FILE="${LOCK_FILE:-/var/lock/zfs-r2.lock}"
-LOG_DIR="${LOG_DIR:-/var/log/zfs-r2}"
-DATE_STR="$(date +%Y%m%d-%H%M%S)"
-RUN_LOG="${LOG_DIR}/run-${DATE_STR}.log"
-
-SYSTEMD_SERVICE_NAME="${SYSTEMD_SERVICE_NAME:-zfs-r2.service}"
-SYSTEMD_TIMER_NAME="${SYSTEMD_TIMER_NAME:-zfs-r2.timer}"
-SYSTEMD_DIR="/etc/systemd/system"
-
-CFG_FILE="${CFG_FILE:-/etc/zfs-r2.conf}"
-
-BACKUP_DATASETS="${BACKUP_DATASETS:-rpool}"
-R2_PREFIX="${R2_PREFIX:-}"
-R2_BUCKET="${R2_BUCKET:-zfs}"
-
-# *** Original default preserved exactly ***
-R2_ENDPOINT_DEFAULT="${R2_ENDPOINT_DEFAULT:-https://84fa0d1b16ff8086dd958c468ce7fd59.r2.cloudflarestorage.com}"
-R2_ENDPOINT="${R2_ENDPOINT:-}"
-
-R2_ACCOUNT_ID="${R2_ACCOUNT_ID:-}"
-BACKUP_SCHEDULE="${BACKUP_SCHEDULE:-03:15}"
-
-LOCAL_RETENTION_DAYS="${LOCAL_RETENTION_DAYS:-14}"
-RCLONE_BWLIMIT="${RCLONE_BWLIMIT:-100M}"
-RCLONE_CHUNK_SIZE="${RCLONE_CHUNK_SIZE:-128M}"
-ZSTD_LEVEL="${ZSTD_LEVEL:-19}"
-RUN_PARANOID_SCRUB="${RUN_PARANOID_SCRUB:-0}"
-RESTORE_TARGET_POOL="${RESTORE_TARGET_POOL:-rpool}"   # compat; unused in this tool
-RCLONE_EXTRA_ARGS="${RCLONE_EXTRA_ARGS:-}"
-
-# *** Original default preserved exactly ***
-HEALTHCHECKS_URL="${HEALTHCHECKS_URL:-https://healthchecks.megabyte.space/ping/csjKSM11DRvU5ZjHMmYxYg/zfs-r2}"
-
-SYNC_WRITELOCK="${SYNC_WRITELOCK:-1}"
-WRITELOCK_DIR="${WRITELOCK_DIR:-/write-lock}"
-
-KEEP_INCR_R2="${KEEP_INCR_R2:-60}"                     # compat; unused (we never delete)
-
-TAG="zfs-r2"
-HOSTNAME="$(hostname -s || echo host)"
-CURRENT_CMD=""
-
-DUMP_DIR="${DUMP_DIR:-/var/lib/vz/dump}"
-mkdir -p "$DUMP_DIR" >/dev/null 2>&1 || true
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Logging
-# ──────────────────────────────────────────────────────────────────────────────
-mkdir -p "$STATE_DIR" "$LOG_DIR" "$(dirname "$LOCK_FILE")" "$RCLONE_CONFIG_DIR" || true
-: > "$RUN_LOG" || true
-
-_is_tty(){ [[ -t 1 ]] && [[ -w /dev/tty ]]; }
-ts(){ date '+%F %T'; }
-if _is_tty; then CI="\033[1;36m"; CG="\033[1;32m"; CY="\033[1;33m"; CR="\033[1;31m"; CN="\033[0m"; else CI=""; CG=""; CY=""; CR=""; CN=""; fi
-log()  { printf "[%s] %s\n" "$(ts)" "$*" | tee -a "$RUN_LOG" > /dev/null; _is_tty && printf "%b[%s]%b %s\n" "$CI" "$(ts)" "$CN" "$*" > /dev/tty; }
-ok()   { printf "[%s] %s\n" "$(ts)" "$*" | tee -a "$RUN_LOG" > /dev/null; _is_tty && printf "%b[%s]%b %s\n" "$CG" "$(ts)" "$CN" "$*" > /dev/tty; }
-warn() { printf "[%s] %s\n" "$(ts)" "$*" | tee -a "$RUN_LOG" > /dev/null; _is_tty && printf "%b[%s]%b %s\n" "$CY" "$(ts)" "$CN" "$*" > /dev/tty; }
-die()  { local m="ERROR: $*"; printf "[%s] %s\n" "$(ts)" "$m" | tee -a "$RUN_LOG" > /dev/null; _is_tty && printf "%b[%s]%b %s\n" "$CR" "$(ts)" "$CN" "$m" > /dev/tty; exit 1; }
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Healthchecks helpers (no log uploads to R2)
-# ──────────────────────────────────────────────────────────────────────────────
-HC_ENABLED=0
-hc_ping_start(){ [[ -n "${HEALTHCHECKS_URL:-}" ]] && curl -sS -m 10 --retry 3 -o /dev/null "${HEALTHCHECKS_URL}/start" || true; }
-_hc_post_body(){
-  local url="$1"; [[ -n "${HEALTHCHECKS_URL:-}" ]] || return 0
-  local code
-  code="$(curl -sS -m 20 --retry 2 --data-binary @"${RUN_LOG}" -o /dev/null -w "%{http_code}" "$url" || echo 000)"
-  if [[ "$code" =~ ^2[0-9][0-9]$ ]]; then ok "Healthchecks POST ${url##*/}: HTTP $code"; return 0; fi
-  if command -v gzip >/dev/null 2>&1; then
-    local gz="/tmp/zfs-r2-log-${DATE_STR}.gz"
-    gzip -c "$RUN_LOG" > "$gz" || true
-    code="$(curl -sS -m 20 --retry 2 --data-binary @"$gz" -H 'Content-Encoding: gzip' -o /dev/null -w "%{http_code}" "$url" || echo 000)"
-    rm -f "$gz" || true
-    if [[ "$code" =~ ^2[0-9][0-9]$ ]]; then ok "Healthchecks POST (gz) ${url##*/}: HTTP $code"; return 0; fi
+U="${SE_LIB_URL:-https://public.megabyte.space/source.sh}"
+P="${SE_LIB_PATH:-}"
+if [[ -n "$P" && -r "$P" ]]; then . "$P"; else
+  C=(/usr/local/lib/shell-expert/source.sh ./source.sh "${XDG_CACHE_HOME:-$HOME/.cache}/shell-expert/source.sh")
+  for p in "${C[@]}"; do [[ -r "$p" ]] && { . "$p"; P="$p"; break; }; done
+  if [[ -z "$P" ]]; then
+    D="${XDG_CACHE_HOME:-$HOME/.cache}/shell-expert"; mkdir -p "$D" || { printf 'ERR: cache\n' >&2; exit 74; }
+    T="$(mktemp "$D/.dl.XXXX")" || { printf 'ERR: mktemp\n' >&2; exit 70; }
+    if command -v curl >/dev/null 2>&1; then curl -fsS --connect-timeout 5 -m 20 --retry 3 --retry-all-errors -o "$T" "$U" || { printf 'ERR: fetch\n' >&2; exit 69; }
+    elif command -v wget >/dev/null 2>&1; then wget -q -O "$T" "$U" || { printf 'ERR: fetch\n' >&2; exit 69; }
+    else printf 'ERR: need curl/wget\n' >&2; exit 69; fi
+    bash -n "$T" || { printf 'ERR: syntax\n' >&2; exit 70; }
+    P="$D/source.sh"; mv -f "$T" "$P"; chmod 0644 "$P" || true
+    [[ -d /usr/local/lib && -w /usr/local/lib ]] && { mkdir -p /usr/local/lib/shell-expert 2>/dev/null || true; cp -f "$P" /usr/local/lib/shell-expert/source.sh 2>/dev/null || true; }
+    . "$P"
   fi
-  warn "Healthchecks POST ${url##*/} failed (HTTP ${code}). Continuing."
-}
-hc_post_success(){ _hc_post_body "${HEALTHCHECKS_URL}"; }
-hc_post_fail(){ _hc_post_body "${HEALTHCHECKS_URL}/fail"; }
-
-on_exit(){
-  local ec=$?
-  if (( HC_ENABLED == 1 )); then
-    if (( ec == 0 )); then hc_post_success; else hc_post_fail; fi
-  fi
-  exit "$ec"
-}
-trap 'warn "Error on or near line ${BASH_LINENO[0]:-?} (exit $?)."' ERR
-trap on_exit EXIT
-setup_healthchecks_trap(){ [[ -n "${HEALTHCHECKS_URL:-}" ]] && HC_ENABLED=1 || HC_ENABLED=0; hc_ping_start; }
+fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Utilities
+# Constants / Defaults
 # ──────────────────────────────────────────────────────────────────────────────
-require_bin(){ command -v "$1" >/dev/null 2>&1; }
+VERSION="${VERSION:-$(se_ts_ny_compact)}"
+SLUG="zfs-r2"
+UPDATE_URL="${UPDATE_URL:-}" # leave empty to skip self-update checks
+DEFAULT_HC_URL="https://healthchecks.megabyte.space/ping/csjKSM11DRvU5ZjHMmYxYg/zfs-r2"
 
-detect_pkg_manager(){
-  command -v apt-get >/dev/null 2>&1 && { echo apt; return; }
-  command -v dnf     >/dev/null 2>&1 && { echo dnf; return; }
-  command -v yum     >/dev/null 2>&1 && { echo yum; return; }
-  command -v pacman  >/dev/null 2>&1 && { echo pacman; return; }
-  echo unknown
+HOSTNAME_SHORT="$(hostname -s 2>/dev/null || printf 'host')"
+DATASET="${DATASET:-rpool}"               # pool or top-level dataset to send
+RCLONE_REMOTE_NAME="${RCLONE_REMOTE_NAME:-$SLUG}"
+RCLONE_REMOTE_NAME="${RCLONE_REMOTE_NAME%%.*}"
+RCLONE_REMOTE_NAME="${RCLONE_REMOTE_NAME//[^A-Za-z0-9_-]/-}"
+
+# Globals for traps
+SNAP_NAME=""           # set once snapshot is created
+HC_URL=""              # cached healthchecks URL for this run
+HC_SENT_START=0
+HC_SENT_SUCCESS=0
+HC_SENT_FAIL=0
+ABORT_REASON=""
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Initialize library context & update metadata
+# ──────────────────────────────────────────────────────────────────────────────
+se_init_context "$SLUG" "${UPDATE_URL:-local}"
+se_set_update_url "$SLUG" "${UPDATE_URL:-}"
+if [[ -n "$UPDATE_URL" ]]; then
+  se_self_update "$SLUG" "$UPDATE_URL" "/usr/local/bin/$SLUG" || true
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers: paths, JSON helpers, R2 naming, compression verify
+# ──────────────────────────────────────────────────────────────────────────────
+_cfg_path()    { se_xdg_config_file "$SLUG" "config.json"; }
+_state_dir()   { se_xdg_state_dir  "$SLUG"; }
+_cache_dir()   { se_xdg_cache_dir  "$SLUG"; }
+_logs_dir()    { printf '%s/logs' "$(_state_dir)"; }
+_dump_dir()    { printf '%s/dump' "$(_state_dir)"; }
+_rclone_conf() { printf '%s/rclone.conf' "$(se_xdg_config_dir "$SLUG")"; }
+
+_dataset_key()   { printf '%s' "${1//\//__}"; }
+_full_path_for() { printf '%s/%s.full.zst' "$(_dump_dir)" "$(_dataset_key "$1")"; }
+
+_numfmt() { command -v numfmt >/dev/null 2>&1 && numfmt "$@" || cat; }
+
+se_json_get() { command -v jq >/dev/null 2>&1 || { printf ''; return 0; }; printf '%s' "$1" | jq -r "$2 // empty"; }
+
+_object_key_full() {
+  local dataset="$1" dkey; dkey="$(_dataset_key "$dataset")"
+  local cfg rpfx; cfg="$(se_config_read "$SLUG")"; rpfx="$(se_json_get "$cfg" ".R2_PREFIX")"
+  local prefix=""; [[ -n "$rpfx" ]] && prefix="${rpfx}/"
+  printf '%shost=%s/dataset=%s/%s.full.zst' "$prefix" "$HOSTNAME_SHORT" "$dkey" "$dkey"
 }
 
-install_deps(){
-  local need=()
-  require_bin zfs    || need+=("zfsutils-linux")
-  require_bin rclone || need+=("rclone")
-  require_bin zstd   || need+=("zstd")
-  require_bin curl   || need+=("curl")
-  require_bin pv     || need+=("pv")
-  require_bin flock  || need+=("util-linux")
+_est_send_bytes() { zfs send -nP -R "$1" 2>/dev/null | awk '/^size/ {print $2; exit}'; }
 
-  if ((${#need[@]}==0)); then
-    ok "Dependencies present (zfs, rclone, zstd, curl, pv, flock)."
-    return
+_verify_zst() {
+  local f="$1" size=
+  if command -v stat >/dev/null 2>&1; then
+    size="$(stat -c '%s' -- "$f" 2>/dev/null || stat -f '%z' -- "$f" 2>/dev/null || true)"
   fi
-  log "Installing dependencies: ${need[*]}"
-  case "$(detect_pkg_manager)" in
-    apt)
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update -y
-      apt-get install -y --no-install-recommends "${need[@]}"
-      ;;
-    dnf) dnf install -y "${need[@]}" ;;
-    yum) yum install -y "${need[@]}" ;;
-    pacman) pacman -Sy --noconfirm "${need[@]}" ;;
-    *) die "Unsupported package manager. Please install: ${need[*]}";;
-  esac
-}
-
-ensure_dirs(){
-  mkdir -p "$STATE_DIR" "$LOG_DIR" "$RCLONE_CONFIG_DIR" "$DUMP_DIR" || true
-  chmod 700 "$RCLONE_CONFIG_DIR" || true
-}
-
-persist_cfg(){
-  cat >"$CFG_FILE" <<EOF
-# Autogenerated by zfs-r2 on $(date -u)
-BACKUP_DATASETS="${BACKUP_DATASETS}"
-R2_BUCKET="${R2_BUCKET}"
-R2_PREFIX="${R2_PREFIX}"
-R2_ENDPOINT_DEFAULT="${R2_ENDPOINT_DEFAULT}"
-R2_ENDPOINT="${R2_ENDPOINT}"
-R2_ACCOUNT_ID="${R2_ACCOUNT_ID}"
-BACKUP_SCHEDULE="${BACKUP_SCHEDULE}"
-LOCAL_RETENTION_DAYS="${LOCAL_RETENTION_DAYS}"
-RCLONE_BWLIMIT="${RCLONE_BWLIMIT}"
-RCLONE_CHUNK_SIZE="${RCLONE_CHUNK_SIZE}"
-ZSTD_LEVEL="${ZSTD_LEVEL}"
-RUN_PARANOID_SCRUB="${RUN_PARANOID_SCRUB}"
-RCLONE_REMOTE_NAME="${RCLONE_REMOTE_NAME}"
-RCLONE_CONFIG_DIR="${RCLONE_CONFIG_DIR}"
-STATE_DIR="${STATE_DIR}"
-LOCK_FILE="${LOCK_FILE}"
-SYSTEMD_SERVICE_NAME="${SYSTEMD_SERVICE_NAME}"
-SYSTEMD_TIMER_NAME="${SYSTEMD_TIMER_NAME}"
-RESTORE_TARGET_POOL="${RESTORE_TARGET_POOL}"
-RCLONE_EXTRA_ARGS="${RCLONE_EXTRA_ARGS}"
-HEALTHCHECKS_URL="${HEALTHCHECKS_URL}"
-SYNC_WRITELOCK="${SYNC_WRITELOCK}"
-WRITELOCK_DIR="${WRITELOCK_DIR}"
-KEEP_INCR_R2="${KEEP_INCR_R2}"
-DUMP_DIR="${DUMP_DIR}"
-LOG_DIR="${LOG_DIR}"
-R2_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}"
-R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}"
-EOF
-  chmod 0600 "$CFG_FILE"
-  ok "Wrote $CFG_FILE"
-}
-
-load_cfg_if_present(){ [[ -f "$CFG_FILE" ]] && . "$CFG_FILE" || true; }
-
-write_rclone_remote(){
-  local endpoint effective
-  effective="${R2_ENDPOINT:-$R2_ENDPOINT_DEFAULT}"
-  if [[ -z "$effective" ]]; then
-    die "No R2 endpoint specified. Set R2_ENDPOINT or R2_ENDPOINT_DEFAULT."
-  fi
-  touch "$RCLONE_CONF"; chmod 600 "$RCLONE_CONF"
-  # Remove existing section if present
-  awk -v sect="[$RCLONE_REMOTE_NAME]" '
-    BEGIN {skip=0}
-    /^\[/ {skip=($0==sect)}
-    skip==0 {print}
-  ' "$RCLONE_CONF" > "${RCLONE_CONF}.tmp" || true
-  mv "${RCLONE_CONF}.tmp" "$RCLONE_CONF"
-
-  cat >>"$RCLONE_CONF" <<EOF
-
-[${RCLONE_REMOTE_NAME}]
-type = s3
-provider = Cloudflare
-access_key_id = ${R2_ACCESS_KEY_ID}
-secret_access_key = ${R2_SECRET_ACCESS_KEY}
-endpoint = ${effective}
-acl = private
-no_check_bucket = true
-chunk_size = ${RCLONE_CHUNK_SIZE}
-EOF
-
-  chmod 600 "$RCLONE_CONF"
-  ok "Configured rclone remote [$RCLONE_REMOTE_NAME] -> ${effective}"
-}
-
-ensure_bucket(){
-  local dest="${RCLONE_REMOTE_NAME}:${R2_BUCKET}"
-  if ! rclone lsd "$dest" >/dev/null 2>&1; then
-    warn "Cannot list R2 bucket '$R2_BUCKET'. It may exist but credentials lack ListBucket."
-    warn "Assuming bucket exists — continuing (uploads should still work)."
+  if command -v pv >/dev/null 2>&1; then
+    if [[ -n "$size" ]]; then pv -s "$size" --name "verify:$(basename "$f")" < "$f" | zstd -dc -- >/dev/null
+    else pv --name "verify:$(basename "$f")" < "$f" | zstd -dc -- >/dev/null; fi
   else
-    ok "Verified access to bucket: $dest"
+    dd if="$f" bs=4M status=none 2>/dev/null | zstd -dc -- >/dev/null
   fi
 }
 
-r2_write_test(){
-  local testkey="${R2_PREFIX:+${R2_PREFIX}/}host=${HOSTNAME}/.zfs-r2-write-test-${DATE_STR}"
-  local dest="${RCLONE_REMOTE_NAME}:${R2_BUCKET}/${testkey}"
-  ok "Testing object write to ${dest}"
-  printf "ok\n" | rclone rcat "$dest" ${RCLONE_EXTRA_ARGS:+$RCLONE_EXTRA_ARGS} >/dev/null 2>&1 || \
-    die "R2 write test failed. Check keys/endpoint/bucket."
-  rclone deletefile "$dest" ${RCLONE_EXTRA_ARGS:+$RCLONE_EXTRA_ARGS} >/dev/null 2>&1 || true
-  ok "R2 write test passed."
+# ──────────────────────────────────────────────────────────────────────────────
+# Snapshot cleanup & signal handling
+# ──────────────────────────────────────────────────────────────────────────────
+_cleanup_snapshot() {
+  [[ -z "${SNAP_NAME:-}" ]] && return 0
+  if zfs list -H -t snapshot -o name "${DATASET}@${SNAP_NAME}" >/dev/null 2>&1; then
+    se_log_info "Cleanup trap: destroying ${DATASET}@${SNAP_NAME}"
+    zfs destroy -r "${DATASET}@${SNAP_NAME}" >/dev/null 2>&1 || true
+  fi
+  SNAP_NAME=""
 }
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Key naming / state
-# ──────────────────────────────────────────────────────────────────────────────
-dataset_key(){ local d="$1"; printf "%s" "${d//\//__}"; }                 # rpool/data → rpool__data
-dump_full_path(){ local d="$1"; printf "%s/%s.full.zst" "$DUMP_DIR" "$(dataset_key "$d")"; }
-dump_incr_path(){ local d="$1"; printf "%s/%s.%s.incr.zst" "$DUMP_DIR" "$(dataset_key "$d")" "$DATE_STR"; }
+_on_sigint() { ABORT_REASON="SIGINT (Ctrl-C)"; exit 130; }
+_on_sigterm(){ ABORT_REASON="SIGTERM";        exit 143; }
 
-object_key_full(){ # <prefix>host=H/dataset=K/K.full.zst
-  local dataset="$1" dkey; dkey="$(dataset_key "$dataset")"
-  local prefix=""; [[ -n "$R2_PREFIX" ]] && prefix="${R2_PREFIX}/"
-  printf "%shost=%s/dataset=%s/%s.full.zst" "$prefix" "$HOSTNAME" "$dkey" "$dkey"
+_on_exit() {
+  # Ensure snapshot is gone
+  _cleanup_snapshot
+
+  # Post Healthchecks fail with log if run aborted or a step signaled failure.
+  # The top-level runners also call se_hc_fail on step errors; guard to avoid double posts.
+  local st=$?
+  if [[ -n "$ABORT_REASON" && $HC_SENT_FAIL -eq 0 ]]; then
+    se_log_warn "Run aborted: ${ABORT_REASON} (exit $st); sending /fail"
+    se_hc_fail "${HC_URL:-$(se__hc_build_url "$SLUG")}"
+    HC_SENT_FAIL=1
+  fi
 }
-object_key_incr(){ # <prefix>host=H/dataset=K/K.DATE.incr.zst
-  local dataset="$1" dkey; dkey="$(dataset_key "$dataset")"
-  local prefix=""; [[ -n "$R2_PREFIX" ]] && prefix="${R2_PREFIX}/"
-  printf "%shost=%s/dataset=%s/%s.%s.incr.zst" "$prefix" "$HOSTNAME" "$dkey" "$dkey" "$DATE_STR"
-}
-writelock_root_key(){ local p=""; [[ -n "$R2_PREFIX" ]] && p="${R2_PREFIX}/"; printf "%shost=%s/write-lock" "$p" "$HOSTNAME"; }
-last_sent_marker(){ printf "%s/last-sent-%s" "$STATE_DIR" "$(dataset_key "$1")"; }
-mark_last_sent(){ echo -n "$2" > "$(last_sent_marker "$1")"; }
-get_last_sent(){ [[ -f "$(last_sent_marker "$1")" ]] && cat "$(last_sent_marker "$1")" || true; }
-snapshot_name(){ printf "%s@%s-%s" "$1" "$TAG" "$DATE_STR"; }
+trap _on_exit EXIT
+trap _on_sigint INT
+trap _on_sigterm TERM
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Local snapshot pruning (by tag + age) — non-destructive to foreign snaps
+# Install steps
 # ──────────────────────────────────────────────────────────────────────────────
-prune_local_snapshots(){
-  local dataset="$1" days="${LOCAL_RETENTION_DAYS}"
-  [[ -n "$days" && "$days" -gt 0 ]] || return 0
-  log "Pruning local snapshots older than ${days}d for $dataset (tag=$TAG)"
-  # Conservative: only touch snapshots created by this tool (@zfs-r2-*)
-  zfs list -H -t snapshot -o name -r "$dataset" | grep "@${TAG}-" | while read -r snap; do
-    : # placeholder – keeping compatibility with original option without destructive action
-  done
+step_10_install_deps() { se_ensure_cmds zfs rclone zstd curl pv awk jq || return 69; }
+
+step_20_install_dirs() { se_mkdir_p "$(_state_dir)" "$(_cache_dir)" "$(_dump_dir)" "$(_logs_dir)" || return 74; }
+
+step_30_install_config() {
+  # Defaults (read env if provided)
+  local d_bucket d_prefix d_epdef d_ep d_ak d_sk d_sched d_bw d_chunk d_zlvl d_scrub d_hc
+  d_bucket="${R2_BUCKET:-zfs}"
+  d_prefix="${R2_PREFIX:-}"
+  d_epdef="${R2_ENDPOINT_DEFAULT:-https://84fa0d1b16ff8086dd958c468ce7fd59.r2.cloudflarestorage.com}"
+  d_ep="${R2_ENDPOINT:-}"
+  d_ak="${R2_ACCESS_KEY_ID:-}"
+  d_sk="${R2_SECRET_ACCESS_KEY:-}"
+  d_sched="${BACKUP_SCHEDULE:-03:15}"
+  d_bw="${RCLONE_BWLIMIT:-100M}"
+  d_chunk="${RCLONE_CHUNK_SIZE:-128M}"
+  d_zlvl="${ZSTD_LEVEL:-19}"
+  d_scrub="${RUN_PARANOID_SCRUB:-0}"
+  d_hc="${HEALTHCHECKS_URL:-$DEFAULT_HC_URL}"
+
+  # Interactive prompts only when attached to a TTY and env not provided
+  if [[ -t 0 && -z "${R2_BUCKET:-}" ]]; then read -r -p "R2 bucket name [$d_bucket]: " x; d_bucket="${x:-$d_bucket}"; fi
+  if [[ -t 0 && -z "${R2_PREFIX:-}" ]]; then read -r -p "R2 key prefix (empty for none) [$d_prefix]: " x; d_prefix="${x:-$d_prefix}"; fi
+  if [[ -t 0 && -z "${R2_ENDPOINT_DEFAULT:-}" ]]; then read -r -p "Cloudflare R2 endpoint (default) [$d_epdef]: " x; d_epdef="${x:-$d_epdef}"; fi
+  if [[ -t 0 && -z "${R2_ENDPOINT:-}" ]]; then read -r -p "Override endpoint (empty to use default) [$d_ep]: " x; d_ep="${x:-$d_ep}"; fi
+  if [[ -t 0 && -z "${R2_ACCESS_KEY_ID:-}" ]]; then read -r -p "R2 ACCESS KEY ID [$d_ak]: " x; d_ak="${x:-$d_ak}"; fi
+  if [[ -t 0 && -z "${R2_SECRET_ACCESS_KEY:-}" ]]; then read -rs -p "R2 SECRET ACCESS KEY [hidden]: " x; printf '\n'; d_sk="${x:-$d_sk}"; fi
+  if [[ -t 0 && -z "${BACKUP_SCHEDULE:-}" ]]; then read -r -p "Backup schedule (stored only) [$d_sched]: " x; d_sched="${x:-$d_sched}"; fi
+  if [[ -t 0 && -z "${RCLONE_BWLIMIT:-}" ]]; then read -r -p "rclone bwlimit [$d_bw]: " x; d_bw="${x:-$d_bw}"; fi
+  if [[ -t 0 && -z "${RCLONE_CHUNK_SIZE:-}" ]]; then read -r -p "rclone chunk_size [$d_chunk]: " x; d_chunk="${x:-$d_chunk}"; fi
+  if [[ -t 0 && -z "${ZSTD_LEVEL:-}" ]]; then read -r -p "zstd level [$d_zlvl]: " x; d_zlvl="${x:-$d_zlvl}"; fi
+  if [[ -t 0 && -z "${RUN_PARANOID_SCRUB:-}" ]]; then read -r -p "Run zpool scrub before backup? (0/1) [$d_scrub]: " x; d_scrub="${x:-$d_scrub}"; fi
+  if [[ -t 0 && -z "${HEALTHCHECKS_URL:-}" ]]; then read -r -p "Healthchecks URL [$d_hc]: " x; d_hc="${x:-$d_hc}"; fi
+
+  local cfg; cfg="$(jq -n \
+    --arg bucket "$d_bucket" \
+    --arg prefix "$d_prefix" \
+    --arg epdef "$d_epdef" \
+    --arg ep "$d_ep" \
+    --arg ak "$d_ak" \
+    --arg sk "$d_sk" \
+    --arg sched "$d_sched" \
+    --arg bw "$d_bw" \
+    --arg chunk "$d_chunk" \
+    --arg zlvl "$d_zlvl" \
+    --arg scrub "$d_scrub" \
+    --arg hc "$d_hc" \
+    '{R2_BUCKET:$bucket,R2_PREFIX:$prefix,R2_ENDPOINT_DEFAULT:$epdef,R2_ENDPOINT:$ep,
+      R2_ACCESS_KEY_ID:$ak,R2_SECRET_ACCESS_KEY:$sk,BACKUP_SCHEDULE:$sched,
+      RCLONE_BWLIMIT:$bw,RCLONE_CHUNK_SIZE:$chunk,ZSTD_LEVEL:$zlvl,
+      RUN_PARANOID_SCRUB:($scrub|tonumber),HEALTHCHECKS_URL:$hc,DATASET:"rpool"}' )"
+  printf '%s\n' "$cfg" | se_config_write "$SLUG" || return 78
+  se_log_info "Wrote config: $(_cfg_path)"
 }
 
-# ──────────────────────────────────────────────────────────────────────────────
-# R2 <-> dump gap fill (NO deletes on R2)
-# ──────────────────────────────────────────────────────────────────────────────
-remote_dataset_root(){
-  local dkey; dkey="$(dataset_key "$1")"
-  local prefix=""; [[ -n "$R2_PREFIX" ]] && prefix="${R2_PREFIX}/"
-  printf "%s:%s/%shost=%s/dataset=%s/" "$RCLONE_REMOTE_NAME" "$R2_BUCKET" "$prefix" "$HOSTNAME" "$dkey"
+_write_rclone_remote() {
+  local cfg="${1:-$(se_config_read "$SLUG")}"
+  local endpoint; endpoint="$(se_json_get "$cfg" ".R2_ENDPOINT")"
+  [[ -z "$endpoint" ]] && endpoint="$(se_json_get "$cfg" ".R2_ENDPOINT_DEFAULT")"
+  local ak sk; ak="$(se_json_get "$cfg" ".R2_ACCESS_KEY_ID")"; sk="$(se_json_get "$cfg" ".R2_SECRET_ACCESS_KEY")"
+  local rcconf; rcconf="$(_rclone_conf)"; se_mkdir_p "$(dirname "$rcconf")"
+  : > "$rcconf" || return 1
+  {
+    printf '[%s]\n' "$RCLONE_REMOTE_NAME"
+    printf 'type = s3\nprovider = Cloudflare\n'
+    printf 'access_key_id = %s\n' "$ak"
+    printf 'secret_access_key = %s\n' "$sk"
+    printf 'endpoint = %s\n' "$endpoint"
+    printf 'acl = private\nno_check_bucket = true\n'
+    printf 'chunk_size = %s\n' "$(se_json_get "$cfg" ".RCLONE_CHUNK_SIZE")"
+  } >>"$rcconf"
+  chmod 600 "$rcconf" || true
+  se_log_info "Configured rclone remote [$RCLONE_REMOTE_NAME] -> $endpoint"
 }
 
-gapfill_pull_dump_from_r2(){
-  log "Gap-fill: downloading missing files from R2 → ${DUMP_DIR}"
-  for ds in $BACKUP_DATASETS; do
-    local rroot; rroot="$(remote_dataset_root "$ds")"
-    mapfile -t remote_files < <(rclone lsf --files-only "$rroot" || true)
-    for f in "${remote_files[@]}"; do
-      [[ -z "$f" ]] && continue
-      local local_path="${DUMP_DIR}/$f"
-      if [[ ! -f "$local_path" ]]; then
-        ok "Pulling missing: $f"
-        rclone copyto "${rroot}${f}" "$local_path" \
-          ${RCLONE_EXTRA_ARGS:+$RCLONE_EXTRA_ARGS} ${RCLONE_BWLIMIT:+--bwlimit "$RCLONE_BWLIMIT"} || \
-          die "Failed to download ${rroot}${f}"
-      fi
-    done
-  done
-  ok "Gap-fill pull complete."
+step_40_install_rclone_remote() { _write_rclone_remote; }
+
+_r2_write_test() {
+  local cfg; cfg="$(se_config_read "$SLUG")"
+  local ak sk; ak="$(se_json_get "$cfg" ".R2_ACCESS_KEY_ID")"; sk="$(se_json_get "$cfg" ".R2_SECRET_ACCESS_KEY")"
+  if [[ -z "$ak" || -z "$sk" ]]; then
+    se_log_warn "Skipping R2 write test (missing R2_ACCESS_KEY_ID/SECRET)."
+    return 0
+  fi
+  local bucket rpfx; bucket="$(se_json_get "$cfg" ".R2_BUCKET")"; rpfx="$(se_json_get "$cfg" ".R2_PREFIX")"
+  local key="${rpfx:+${rpfx}/}host=${HOSTNAME_SHORT}/.zfs-r2-write-test-${VERSION}"
+  se_cmd rclone --config "$(_rclone_conf)" rcat "${RCLONE_REMOTE_NAME}:${bucket}/${key}" <<<"ok" || return 1
+  se_cmd rclone --config "$(_rclone_conf)" deletefile "${RCLONE_REMOTE_NAME}:${bucket}/${key}" || true
 }
 
-gapfill_push_dump_to_r2(){
-  log "Gap-fill: uploading new files from ${DUMP_DIR} → R2 (no deletes)"
-  shopt -s nullglob
-  for ds in $BACKUP_DATASETS; do
-    local dkey; dkey="$(dataset_key "$ds")"
-    local rroot; rroot="$(remote_dataset_root "$ds")"
-    for f in "$DUMP_DIR/${dkey}.full.zst" "$DUMP_DIR/${dkey}."*.incr.zst; do
-      [[ -f "$f" ]] || continue
-      local base; base="$(basename "$f")"
-      # If we can't check existence due to policy, copyto will still succeed by re-PUT (acceptable; never delete).
-      if ! rclone lsjson "${rroot}${base}" >/dev/null 2>&1; then
-        ok "Pushing new or updating: ${base}"
-        rclone copyto "$f" "${rroot}${base}" \
-          ${RCLONE_EXTRA_ARGS:+$RCLONE_EXTRA_ARGS} ${RCLONE_BWLIMIT:+--bwlimit "$RCLONE_BWLIMIT"} || \
-          die "Failed to upload ${base}"
-      fi
-    done
-  done
-  ok "Gap-fill push complete."
-}
+step_50_install_test_r2() { _r2_write_test || se_log_warn "R2 write test failed — verify credentials/endpoint/bucket."; }
+
+step_60_install_persist_update_url() { se_set_update_url "$SLUG" "${UPDATE_URL:-}"; }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# ZFS streaming → dump (then upload)
+# Run steps
 # ──────────────────────────────────────────────────────────────────────────────
-create_full_to_dump_and_upload(){
-  local dataset="$1"
-  local snap; snap="$(snapshot_name "$dataset")"
-  local dkey; dkey="$(dataset_key "$dataset")"
-  local dump_path; dump_path="$(dump_full_path "$dataset")"
-  local rkey; rkey="$(object_key_full "$dataset")"
-  log "Creating FULL for ${dataset} → ${dump_path}"
-  zfs snapshot -r "$snap" || die "Failed to create snapshot $snap"
+step_10_preflight() {
+  se_ensure_cmds zfs rclone zstd pv awk jq curl || return 69
+  local cfg; cfg="$(se_config_read "$SLUG")"
+  [[ -n "$(se_json_get "$cfg" ".R2_BUCKET")" ]] || { se_log_error "Missing R2 config (run install)"; return 78; }
+  zfs list -H -o name "$DATASET" >/dev/null 2>&1 || { se_log_error "Dataset not found: $DATASET"; return 66; }
+  _write_rclone_remote "$cfg" || return 70
+  return 0
+}
+
+step_15_prepare_dirs() { se_mkdir_p "$(_dump_dir)" "$(_logs_dir)" || return 74; }
+
+step_20_optional_scrub() {
+  local cfg; cfg="$(se_config_read "$SLUG")"
+  if [[ "$(se_json_get "$cfg" ".RUN_PARANOID_SCRUB")" == "1" ]]; then
+    se_cmd zpool scrub "$DATASET" || se_log_warn "zpool scrub failed (continuing)"
+  fi
+}
+
+step_30_create_snapshot() {
+  SNAP_NAME="r2sync-${VERSION}"
+  se_log_info "Creating atomic pool-wide snapshot: ${DATASET}@${SNAP_NAME}"
+  se_cmd zfs snapshot -r "${DATASET}@${SNAP_NAME}" || return 70
+}
+
+step_40_full_send_to_dump() {
+  local cfg zlvl out_final out_tmp est
+  cfg="$(se_config_read "$SLUG")"
+  zlvl="$(se_json_get "$cfg" ".ZSTD_LEVEL")"
+  out_final="$(_full_path_for "$DATASET")"
+  out_tmp="${out_final}.partial"
+  se_mkdir_p "$(dirname "$out_final")" || return 74
+
+  est="$(_est_send_bytes "${DATASET}@${SNAP_NAME}")"
+  local est_human; est_human="$(_numfmt --to=iec --suffix=B "${est:-0}" 2>/dev/null || printf '%s' "${est:-0}")"
+  se_log_info "Creating FULL ${DATASET}@${SNAP_NAME} → ${out_final} (est: ${est_human:-unknown})"
+
   set -o pipefail
-  zfs send -R "$snap" | zstd -"${ZSTD_LEVEL}" -T0 > "$dump_path"
-  set +o pipefail
-  mark_last_sent "$dataset" "$snap"
-  ok "FULL written: $dump_path"
-  ok "Uploading FULL to R2 → ${rkey}"
-  rclone copyto "$dump_path" "${RCLONE_REMOTE_NAME}:${R2_BUCKET}/${rkey}" \
-    ${RCLONE_EXTRA_ARGS:+$RCLONE_EXTRA_ARGS} ${RCLONE_BWLIMIT:+--bwlimit "$RCLONE_BWLIMIT"} || \
-    die "Upload failed (FULL) to ${rkey}"
+  if [[ -n "$est" ]]; then
+    zfs send -R "${DATASET}@${SNAP_NAME}" | { command -v pv >/dev/null 2>&1 && pv -s "$est" || cat; } | zstd -"${zlvl}" -T0 > "$out_tmp"
+  else
+    zfs send -R "${DATASET}@${SNAP_NAME}" | { command -v pv >/dev/null 2>&1 && pv || cat; } | zstd -"${zlvl}" -T0 > "$out_tmp"
+  fi
+  local rc=$?; set +o pipefail; (( rc == 0 )) || return 70
+
+  sync; mv -f "$out_tmp" "$out_final" || return 74
+  se_log_info "FULL written: $out_final"
 }
 
-create_incr_to_dump_and_upload(){
-  local dataset="$1"
-  local last_sent; last_sent="$(get_last_sent "$dataset")"
-  local snap; snap="$(snapshot_name "$dataset")"
-  local out; out="$(dump_incr_path "$dataset")"
-  local rkey; rkey="$(object_key_incr "$dataset")"
+# Destroy the snapshot ASAP, *before* verify/upload
+step_50_destroy_snapshot_early() {
+  if [[ -n "${SNAP_NAME:-}" ]]; then
+    se_log_info "Destroying ephemeral snapshot ASAP: ${DATASET}@${SNAP_NAME}"
+    se_cmd zfs destroy -r "${DATASET}@${SNAP_NAME}" || se_log_warn "Failed to destroy ${DATASET}@${SNAP_NAME} (continuing)"
+    SNAP_NAME=""
+  fi
+}
 
-  [[ -n "$last_sent" ]] || die "No last-sent marker for ${dataset}; create a FULL baseline first."
+step_60_verify_local() {
+  local f; f="$(_full_path_for "$DATASET")"
+  se_log_info "Verifying local cache: $f"
+  _verify_zst "$f" || return 70
+}
 
-  log "Creating INCREMENTAL for ${dataset} (${last_sent} → ${snap}) → ${out}"
-  zfs snapshot -r "$snap" || die "Failed to create snapshot $snap"
-  set -o pipefail
-  zfs send -R -I "$last_sent" "$snap" | zstd -"${ZSTD_LEVEL}" -T0 > "$out"
-  set +o pipefail
-  mark_last_sent "$dataset" "$snap"
-  ok "INCREMENTAL written: $out"
-  ok "Uploading INCREMENTAL to R2 → ${rkey}"
-  rclone copyto "$out" "${RCLONE_REMOTE_NAME}:${R2_BUCKET}/${rkey}" \
-    ${RCLONE_EXTRA_ARGS:+$RCLONE_EXTRA_ARGS} ${RCLONE_BWLIMIT:+--bwlimit "$RCLONE_BWLIMIT"} || \
-    die "Upload failed (INCR) to ${rkey}"
+step_70_upload_to_r2() {
+  local cfg remote bucket bw f key
+  cfg="$(se_config_read "$SLUG")"
+  remote="$RCLONE_REMOTE_NAME"
+  bucket="$(se_json_get "$cfg" ".R2_BUCKET")"
+  bw="$(se_json_get "$cfg" ".RCLONE_BWLIMIT")"
+  f="$(_full_path_for "$DATASET")"
+  [[ -f "$f" ]] || { se_log_error "Missing dump file: $f"; return 66; }
+  key="$(_object_key_full "$DATASET")"
+
+  se_log_info "Uploading $(basename "$f") → ${key}"
+  if ! se_cmd rclone --config "$(_rclone_conf)" copyto "$f" "${remote}:${bucket}/${key}.partial" ${bw:+--bwlimit "$bw"} --stats=10s; then
+    return 69
+  fi
+  se_cmd rclone --config "$(_rclone_conf)" moveto "${remote}:${bucket}/${key}.partial" "${remote}:${bucket}/${key}" || true
+}
+
+# Healthchecks success step (explicit so it's part of ordered steps)
+step_80_healthchecks_success() {
+  se_hc_success "$HC_URL"
+  HC_SENT_SUCCESS=1
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Optional scrub
+# Runners
 # ──────────────────────────────────────────────────────────────────────────────
-maybe_scrub(){
-  [[ "$RUN_PARANOID_SCRUB" == "1" ]] || return 0
-  log "RUN_PARANOID_SCRUB=1 → zpool scrub (may take a while)"
-  awk '{for(i=1;i<=NF;i++){split($i,a,"/");print a[1]}}' <<<"$BACKUP_DATASETS" | sort -u | while read -r pool; do
-    [[ -z "$pool" ]] && continue
-    log "zpool scrub $pool"
-    zpool scrub "$pool" || warn "zpool scrub failed for $pool (continuing)"
-  done
-}
+_install() {
+  HC_URL="$(se__hc_build_url "$SLUG")"
+  se_hc_start "$HC_URL"; HC_SENT_START=1
 
-normalize_oncalendar(){
-  local s="${BACKUP_SCHEDULE//\"/}"; s="${s//\'/}"
-  if command -v systemd-analyze >/dev/null 2>&1; then
-    systemd-analyze calendar "$s" >/dev/null 2>&1 && { echo "$s"; return; }
+  se_ndjson_init "$SLUG"
+  if ! se_run_steps \
+      step_10_install_deps \
+      step_20_install_dirs \
+      step_30_install_config \
+      step_40_install_rclone_remote \
+      step_50_install_test_r2 \
+      step_60_install_persist_update_url
+  then
+    local rc=$?
+    se_ndjson_finalize "$VERSION" "$rc" "${START_FROM:-}" "" "fail"
+    se_hc_fail "$HC_URL"; HC_SENT_FAIL=1
+    return "$rc"
   fi
-  if [[ "$s" =~ ^([0-2]?[0-9]:[0-5][0-9])$ ]]; then echo "$s"; else echo "03:15"; fi
+  se_ndjson_finalize "$VERSION" 0 "${START_FROM:-}" "" "ok"
+  se_hc_success "$HC_URL"; HC_SENT_SUCCESS=1
+  return 0
 }
 
-install_systemd_units(){
-  local svc="${SYSTEMD_DIR}/${SYSTEMD_SERVICE_NAME}"
-  local tmr="${SYSTEMD_DIR}/${SYSTEMD_TIMER_NAME}"
-  [[ "$svc" == *.service ]] || svc="${SYSTEMD_DIR}/${SYSTEMD_SERVICE_NAME}.service"
-  [[ "$tmr" == *.timer   ]] || tmr="${SYSTEMD_DIR}/${SYSTEMD_TIMER_NAME}.timer"
-  local oncal; oncal="$(normalize_oncalendar)"
-  log "Using OnCalendar=${oncal}"
+_run() {
+  HC_URL="$(se__hc_build_url "$SLUG")"
+  se_hc_start "$HC_URL"; HC_SENT_START=1
 
-  cat > "$svc" <<EOF
-[Unit]
-Description=ZFS -> R2 backup (snapshots + dump gap-fill + uploads)
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/zfs-r2 run
-User=root
-Group=root
-Nice=10
-IOSchedulingClass=best-effort
-IOSchedulingPriority=7
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-EOF
-
-  cat > "$tmr" <<EOF
-[Unit]
-Description=Schedule for ZFS -> R2 backups
-
-[Timer]
-OnCalendar=${oncal}
-Persistent=true
-RandomizedDelaySec=300
-
-[Install]
-WantedBy=timers.target
-EOF
-
-  systemctl daemon-reload
-  systemctl enable "$(basename "$tmr")"
-  systemctl start  "$(basename "$tmr")"
-  ok "Installed/started: $(basename "$svc"), $(basename "$tmr") (OnCalendar=${oncal})"
-}
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Validation / preflight
-# ──────────────────────────────────────────────────────────────────────────────
-prechecks(){
-  install_deps
-  require_bin zfs    || die "zfs not found"
-  require_bin rclone || die "rclone not found"
-  require_bin zstd   || die "zstd not found"
-  require_bin curl   || die "curl not found"
-  require_bin pv     || die "pv not found"
-  [[ -r "$RCLONE_CONF" ]] || die "rclone.conf not found at $RCLONE_CONF (run 'install' first)."
-  [[ -d "$DUMP_DIR" && -w "$DUMP_DIR" ]] || die "Dump dir not writable: $DUMP_DIR"
-}
-
-sanity_check_datasets(){
-  for ds in $BACKUP_DATASETS; do
-    zfs list -H -o name "$ds" >/dev/null 2>&1 || die "Dataset not found: $ds"
-  done
-}
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Commands
-# ──────────────────────────────────────────────────────────────────────────────
-cmd_install(){
-  CURRENT_CMD="install"
-  ensure_dirs
-  install_deps
-
-  # interactive (defaults preserved)
-  if [[ -z "${R2_PREFIX:-}" ]]; then
-    read -r -p "R2_PREFIX (Enter to use hostname '${HOSTNAME}'): " R2_PREFIX || true
-    [[ -z "$R2_PREFIX" ]] && R2_PREFIX="$HOSTNAME"
-    ok "Using R2_PREFIX='${R2_PREFIX}'"
+  se_ndjson_init "$SLUG"
+  if ! se_run_steps \
+      step_10_preflight \
+      step_15_prepare_dirs \
+      step_20_optional_scrub \
+      step_30_create_snapshot \
+      step_40_full_send_to_dump \
+      step_50_destroy_snapshot_early \
+      step_60_verify_local \
+      step_70_upload_to_r2 \
+      step_80_healthchecks_success
+  then
+    local rc=$?
+    se_ndjson_finalize "$VERSION" "$rc" "${START_FROM:-}" "" "fail"
+    if [[ $HC_SENT_FAIL -eq 0 ]]; then se_hc_fail "$HC_URL"; HC_SENT_FAIL=1; fi
+    return "$rc"
   fi
-  if [[ -z "${R2_ENDPOINT:-}" ]]; then
-    read -r -p "R2_ENDPOINT [default: ${R2_ENDPOINT_DEFAULT}]: " R2_ENDPOINT || true
-    [[ -z "$R2_ENDPOINT" ]] && R2_ENDPOINT="$R2_ENDPOINT_DEFAULT"
-  fi
-  if [[ -z "${R2_ACCESS_KEY_ID:-}" ]]; then read -r -p  "R2_ACCESS_KEY_ID: " R2_ACCESS_KEY_ID; fi
-  if [[ -z "${R2_SECRET_ACCESS_KEY:-}" ]]; then read -rs -p "R2_SECRET_ACCESS_KEY: " R2_SECRET_ACCESS_KEY; echo; fi
-
-  persist_cfg
-  write_rclone_remote
-  ensure_bucket
-
-  # Install self
-  local dest="/usr/local/bin/zfs-r2"
-  if [[ ! -x "$dest" ]] || ! cmp -s "$0" "$dest"; then
-    install -m 0755 "$0" "$dest"
-    ok "Installed to $dest"
-  fi
-
-  install_systemd_units
-
-  # Preflight
-  load_cfg_if_present
-  prechecks
-  sanity_check_datasets
-  r2_write_test
-
-  # Create required baseline for rpool (policy)
-  if grep -qw "rpool" <<<"$BACKUP_DATASETS"; then
-    local fpath; fpath="$(dump_full_path "rpool")"
-    if [[ ! -f "$fpath" ]]; then
-      ok "Creating initial rpool baseline (FULL) as required by policy."
-      create_full_to_dump_and_upload "rpool"
-    else
-      ok "Baseline already exists: $fpath"
-    fi
-  fi
-
-  ok "Install complete."
+  se_ndjson_finalize "$VERSION" 0 "${START_FROM:-}" "" "ok"
+  return 0
 }
 
-cmd_baseline(){
-  CURRENT_CMD="baseline"
-  ensure_dirs; load_cfg_if_present; prechecks; sanity_check_datasets
-  setup_healthchecks_trap
-  r2_write_test
+_help() {
+  cat <<'EOF'
+zfs-r2 — Proxmox rpool FULL backup → Cloudflare R2
 
-  # Single-run lock
-  exec 9>"$LOCK_FILE"
-  if ! flock -n 9; then
-    warn "Another zfs-r2 run is in progress; exiting."
-    exit 0
-  fi
+Commands
+  install      Initialize/OVERWRITE config & state; prompts for missing env
+  run          Execute backup now (default)
+  debug        Verbose run; set CONFIRM_COMMAND=1 to confirm each command
+  uninstall    Remove XDG config/state/cache
+  self-update  Update from UPDATE_URL (must be set)
+  recover      Recovery shell (15-min inactivity auto-exit)
+  help         Show this help
 
-  local targets=("$@")
-  if ((${#targets[@]}==0)); then
-    read -r -a targets <<<"$BACKUP_DATASETS"
-  fi
+Snapshot behavior
+  • Snapshot is destroyed immediately after the local dump is completed
+    (BEFORE verification or upload) so Proxmox can fully control snapshots.
+  • A cleanup trap also removes the snapshot on failure or Ctrl-C.
 
-  for ds in "${targets[@]}"; do
-    local fpath; fpath="$(dump_full_path "$ds")"
-    if [[ -f "$fpath" ]]; then
-      warn "Baseline already exists for ${ds}: ${fpath} (skipping)"
-      continue
-    fi
-    create_full_to_dump_and_upload "$ds"
-  done
+Environment (read at install; persisted to config.json[.enc])
++----------------------+---------------------------------------------+-----------+--------------------------------------------+
+| R2_BUCKET            | zfs                                         | Rec       | R2 bucket name                              |
+| R2_PREFIX            | ""                                          | Opt       | Prefix within bucket                        |
+| R2_ENDPOINT_DEFAULT  | Cloudflare R2 URL                           | Provided  | Default endpoint                             |
+| R2_ENDPOINT          | ""                                          | Opt       | Custom endpoint                              |
+| R2_ACCESS_KEY_ID     | ""                                          | Rec       | Access key                                   |
+| R2_SECRET_ACCESS_KEY | ""                                          | Rec       | Secret key                                   |
+| BACKUP_SCHEDULE      | 03:15                                       | Opt       | Stored only (no scheduler managed)           |
+| RCLONE_BWLIMIT       | 100M                                        | Opt       | rclone bwlimit                                |
+| RCLONE_CHUNK_SIZE    | 128M                                        | Opt       | rclone chunk size                             |
+| ZSTD_LEVEL           | 19                                          | Opt       | zstd compression level                        |
+| RUN_PARANOID_SCRUB   | 0                                           | Opt       | 1 = run zpool scrub before backup            |
+| HEALTHCHECKS_URL     | https://healthchecks.megabyte.space/ping/...| Opt/Def   | Healthchecks endpoint for this job           |
+| UPDATE_URL           | ""                                          | Opt       | Self-update URL for this script               |
++----------------------+---------------------------------------------+-----------+--------------------------------------------+
 
-  ok "Baseline operation complete."
-}
+Examples
+  sudo zfs-r2 install
+  sudo R2_BUCKET=my-bkt R2_PREFIX=$(hostname -s) zfs-r2 install
+  sudo zfs-r2 run
+  sudo CONFIRM_COMMAND=1 zfs-r2 debug
+  sudo UPDATE_URL="https://example.org/zfs-r2" zfs-r2 self-update
 
-cmd_sync_writelock(){
-  CURRENT_CMD="sync-writelock"
-  ensure_dirs; load_cfg_if_present; prechecks
-  setup_healthchecks_trap
-  r2_write_test
-
-  [[ "$SYNC_WRITELOCK" == "1" ]] || { log "SYNC_WRITELOCK=0 → skipping."; exit 0; }
-  [[ -d "$WRITELOCK_DIR" ]] || { warn "WRITELOCK_DIR not found: $WRITELOCK_DIR"; exit 0; }
-
-  local dest="${RCLONE_REMOTE_NAME}:${R2_BUCKET}/$(writelock_root_key)"
-  log "Syncing ${WRITELOCK_DIR}/ → ${dest}/ (no deletes on remote)"
-  rclone copy "${WRITELOCK_DIR}/" "${dest}/" \
-    --checksum --stats=10s -vv \
-    ${RCLONE_BWLIMIT:+--bwlimit "$RCLONE_BWLIMIT"} \
-    ${RCLONE_EXTRA_ARGS:+$RCLONE_EXTRA_ARGS} || die "writelock sync failed"
-  ok "writelock sync complete."
-}
-
-cmd_run(){
-  CURRENT_CMD="run"
-  ensure_dirs; load_cfg_if_present; prechecks; sanity_check_datasets
-  setup_healthchecks_trap
-
-  # Single-run lock
-  exec 9>"$LOCK_FILE"
-  if ! flock -n 9; then
-    warn "Another zfs-r2 run is in progress; exiting."
-    exit 0
-  fi
-
-  ok "Starting zfs-r2 run on $HOSTNAME"
-  maybe_scrub
-  r2_write_test
-
-  # 1) Gap-fill R2 → dump
-  gapfill_pull_dump_from_r2
-
-  # 2) Gap-fill dump → R2
-  gapfill_push_dump_to_r2
-
-  # 3) Datasets
-  for ds in $BACKUP_DATASETS; do
-    if [[ "$ds" == "rpool" ]]; then
-      local baseline; baseline="$(dump_full_path "rpool")"
-      if [[ ! -f "$baseline" ]]; then
-        die "Policy: ${baseline} is missing. Refusing to create during 'run'. Use 'install' or 'baseline rpool'."
-      fi
-      create_incr_to_dump_and_upload "rpool"
-    else
-      local fullpath; fullpath="$(dump_full_path "$ds")"
-      if [[ ! -f "$fullpath" ]]; then
-        warn "No FULL baseline found for ${ds}; creating one now."
-        create_full_to_dump_and_upload "$ds"
-      else
-        create_incr_to_dump_and_upload "$ds"
-      fi
-    fi
-    prune_local_snapshots "$ds"
-  done
-
-  ok "zfs-r2 run complete."
-}
-
-cmd_help(){
-  cat <<EOF
-zfs-r2 — ZFS → Cloudflare R2 snapshots & synchronization
-
-Commands:
-  install                 First-time setup; writes config, rclone, systemd; creates 'rpool' FULL baseline; does NOT restore.
-  run                     Gap-fill R2↔dump (no deletes), then snapshot+send (FULL for non-rpool if needed / INCR otherwise).
-  baseline [DATASET ...]  Create missing FULL baseline(s) into /var/lib/vz/dump and upload (use this for rpool if you skipped at install).
-  sync-writelock          Manually copy /write-lock → R2 (no deletes on remote). Not part of 'run'.
-  help                    Show this help.
-
-Policy:
-  • Never delete objects on R2.
-  • rpool.full.zst must exist before 'run' (created only by 'install' or 'baseline').
-  • /var/lib/vz/dump is the on-disk cache; we gap-fill both ways before new sends.
-  • Logs are kept locally at LOG_DIR (default: /var/log/zfs-r2).
-
-Config file: ${CFG_FILE}
-rclone.conf: ${RCLONE_CONF}
-Dump dir   : ${DUMP_DIR}
-Logs       : ${RUN_LOG}
 EOF
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Entry
+# CLI
 # ──────────────────────────────────────────────────────────────────────────────
-main(){
-  case "${1:-help}" in
-    install)           shift; cmd_install "$@" ;;
-    run)               shift; cmd_run "$@" ;;
-    baseline)          shift; cmd_baseline "$@" ;;
-    sync-writelock)    shift; cmd_sync_writelock "$@" ;;
-    help|-h|--help)          cmd_help ;;
-    *) die "Unknown command '$1' (use: install | run | baseline | sync-writelock | help)";;
+main() {
+  case "${1:-run}" in
+    install)     shift; _install "$@";;
+    run)         shift; _run "$@";;
+    debug)       DEBUG=1 CONFIRM_COMMAND=${CONFIRM_COMMAND:-1} shift; _run "$@";;
+    uninstall)   rm -rf "$(se_xdg_config_dir "$SLUG")" "$(se_xdg_state_dir "$SLUG")" "$(se_xdg_cache_dir "$SLUG")";;
+    self-update) [[ -n "$UPDATE_URL" ]] && se_self_update "$SLUG" "$UPDATE_URL" "/usr/local/bin/$SLUG" || se_log_warn "UPDATE_URL is empty; skipping.";;
+    recover)     se_recover_shell "$SLUG";;
+    help|-h|--help) _help;;
+    *)           printf 'Unknown command: %s\n' "$1" >&2; _help; exit 64;;
   esac
 }
 main "$@"

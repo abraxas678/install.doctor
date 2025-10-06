@@ -2,12 +2,17 @@
 # ==============================================================================
 #  zfs-r2 — Proxmox rpool FULL backup → Cloudflare R2
 # ------------------------------------------------------------------------------
+#  Modes:
+#    • Disk-backed (default): dumps to /var/lib/zfs-r2/dump/*.zst then uploads
+#    • Streaming (STREAM_MODE=1): no local dump; stream → verify → upload
+#
 #  Design (crash-consistent, no Proxmox VM snapshots):
 #    1) Single pool-wide snapshot: rpool@r2sync-<YYYYmmdd-HHMMSS>
-#    2) Stream with `zfs send -R` → compress to single .zst in state/dump
-#    3) Destroy snapshot **immediately after local dump completes**
-#    4) Verify by full decompression locally
-#    5) Upload to Cloudflare R2 atomically: .partial → moveto final
+#    2a) Disk-backed: zfs send -R → zstd → write *.zst in state/dump
+#    2b) Streaming  : zfs send -R → zstd → tee(verify) → rclone rcat to .partial
+#    3) Destroy snapshot immediately after dump/stream completes
+#    4) Verify (disk-backed: local zstd -t; streaming: inline via tee)
+#    5) Upload atomically: .partial → moveto final
 #    6) Healthchecks: /start on begin; post logs on success or /fail
 #
 #  Commands:
@@ -30,6 +35,15 @@
 #  Healthchecks default:
 #    https://healthchecks.megabyte.space/ping/csjKSM11DRvU5ZjHMmYxYg/zfs-r2
 # ==============================================================================
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Force XDG paths to match header (when run as root)
+# ──────────────────────────────────────────────────────────────────────────────
+if [[ $EUID -eq 0 ]]; then
+  export XDG_CONFIG_HOME=/etc
+  export XDG_STATE_HOME=/var/lib
+  export XDG_CACHE_HOME=/var/cache
+fi
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Shell Expert library bootstrap (source.sh)
@@ -93,6 +107,9 @@ _logs_dir()    { printf '%s/logs' "$(_state_dir)"; }
 _dump_dir()    { printf '%s/dump' "$(_state_dir)"; }
 _rclone_conf() { printf '%s/rclone.conf' "$(se_xdg_config_dir "$SLUG")"; }
 
+# Multi-path mkdir wrapper (works even if se_mkdir_p only takes one arg)
+__mkpaths() { for _d in "$@"; do se_mkdir_p "$_d" || mkdir -p "$_d"; done; }
+
 _dataset_key()   { printf '%s' "${1//\//__}"; }
 _full_path_for() { printf '%s/%s.full.zst' "$(_dump_dir)" "$(_dataset_key "$1")"; }
 
@@ -141,12 +158,11 @@ _on_exit() {
   # Ensure snapshot is gone
   _cleanup_snapshot
 
-  # Post Healthchecks fail with log if run aborted or a step signaled failure.
-  # The top-level runners also call se_hc_fail on step errors; guard to avoid double posts.
+  # Post Healthchecks fail with log if run aborted; guard to avoid double posts.
   local st=$?
   if [[ -n "$ABORT_REASON" && $HC_SENT_FAIL -eq 0 ]]; then
     se_log_warn "Run aborted: ${ABORT_REASON} (exit $st); sending /fail"
-    se_hc_fail "${HC_URL:-$(se__hc_build_url "$SLUG")}"
+    se_hc_fail "${HC_URL:-$(se_hc_get_base)}"
     HC_SENT_FAIL=1
   fi
 }
@@ -159,11 +175,11 @@ trap _on_sigterm TERM
 # ──────────────────────────────────────────────────────────────────────────────
 step_10_install_deps() { se_ensure_cmds zfs rclone zstd curl pv awk jq || return 69; }
 
-step_20_install_dirs() { se_mkdir_p "$(_state_dir)" "$(_cache_dir)" "$(_dump_dir)" "$(_logs_dir)" || return 74; }
+step_20_install_dirs() { __mkpaths "$(_state_dir)" "$(_cache_dir)" "$(_dump_dir)" "$(_logs_dir)" || return 74; }
 
 step_30_install_config() {
   # Defaults (read env if provided)
-  local d_bucket d_prefix d_epdef d_ep d_ak d_sk d_sched d_bw d_chunk d_zlvl d_scrub d_hc
+  local d_bucket d_prefix d_epdef d_ep d_ak d_sk d_sched d_bw d_chunk d_zlvl d_scrub d_hc d_stream
   d_bucket="${R2_BUCKET:-zfs}"
   d_prefix="${R2_PREFIX:-}"
   d_epdef="${R2_ENDPOINT_DEFAULT:-https://84fa0d1b16ff8086dd958c468ce7fd59.r2.cloudflarestorage.com}"
@@ -176,6 +192,7 @@ step_30_install_config() {
   d_zlvl="${ZSTD_LEVEL:-19}"
   d_scrub="${RUN_PARANOID_SCRUB:-0}"
   d_hc="${HEALTHCHECKS_URL:-$DEFAULT_HC_URL}"
+  d_stream="${STREAM_MODE:-0}"
 
   # Interactive prompts only when attached to a TTY and env not provided
   if [[ -t 0 && -z "${R2_BUCKET:-}" ]]; then read -r -p "R2 bucket name [$d_bucket]: " x; d_bucket="${x:-$d_bucket}"; fi
@@ -190,6 +207,7 @@ step_30_install_config() {
   if [[ -t 0 && -z "${ZSTD_LEVEL:-}" ]]; then read -r -p "zstd level [$d_zlvl]: " x; d_zlvl="${x:-$d_zlvl}"; fi
   if [[ -t 0 && -z "${RUN_PARANOID_SCRUB:-}" ]]; then read -r -p "Run zpool scrub before backup? (0/1) [$d_scrub]: " x; d_scrub="${x:-$d_scrub}"; fi
   if [[ -t 0 && -z "${HEALTHCHECKS_URL:-}" ]]; then read -r -p "Healthchecks URL [$d_hc]: " x; d_hc="${x:-$d_hc}"; fi
+  if [[ -t 0 && -z "${STREAM_MODE:-}" ]]; then read -r -p "Enable streaming (no local dump)? (0/1) [$d_stream]: " x; d_stream="${x:-$d_stream}"; fi
 
   local cfg; cfg="$(jq -n \
     --arg bucket "$d_bucket" \
@@ -204,10 +222,12 @@ step_30_install_config() {
     --arg zlvl "$d_zlvl" \
     --arg scrub "$d_scrub" \
     --arg hc "$d_hc" \
+    --arg stream "$d_stream" \
     '{R2_BUCKET:$bucket,R2_PREFIX:$prefix,R2_ENDPOINT_DEFAULT:$epdef,R2_ENDPOINT:$ep,
       R2_ACCESS_KEY_ID:$ak,R2_SECRET_ACCESS_KEY:$sk,BACKUP_SCHEDULE:$sched,
       RCLONE_BWLIMIT:$bw,RCLONE_CHUNK_SIZE:$chunk,ZSTD_LEVEL:$zlvl,
-      RUN_PARANOID_SCRUB:($scrub|tonumber),HEALTHCHECKS_URL:$hc,DATASET:"rpool"}' )"
+      RUN_PARANOID_SCRUB:($scrub|tonumber),HEALTHCHECKS_URL:$hc,DATASET:"rpool",
+      STREAM_MODE:($stream|tonumber)}' )"
   printf '%s\n' "$cfg" | se_config_write "$SLUG" || return 78
   se_log_info "Wrote config: $(_cfg_path)"
 }
@@ -217,7 +237,7 @@ _write_rclone_remote() {
   local endpoint; endpoint="$(se_json_get "$cfg" ".R2_ENDPOINT")"
   [[ -z "$endpoint" ]] && endpoint="$(se_json_get "$cfg" ".R2_ENDPOINT_DEFAULT")"
   local ak sk; ak="$(se_json_get "$cfg" ".R2_ACCESS_KEY_ID")"; sk="$(se_json_get "$cfg" ".R2_SECRET_ACCESS_KEY")"
-  local rcconf; rcconf="$(_rclone_conf)"; se_mkdir_p "$(dirname "$rcconf")"
+  local rcconf; rcconf="$(_rclone_conf)"; __mkpaths "$(dirname "$rcconf")"
   : > "$rcconf" || return 1
   {
     printf '[%s]\n' "$RCLONE_REMOTE_NAME"
@@ -229,7 +249,7 @@ _write_rclone_remote() {
     printf 'chunk_size = %s\n' "$(se_json_get "$cfg" ".RCLONE_CHUNK_SIZE")"
   } >>"$rcconf"
   chmod 600 "$rcconf" || true
-  se_log_info "Configured rclone remote [$RCLONE_REMOTE_NAME] -> $endpoint"
+  se_log_info "Configured rclone remote [%s] -> %s" "$RCLONE_REMOTE_NAME" "$endpoint"
 }
 
 step_40_install_rclone_remote() { _write_rclone_remote; }
@@ -263,7 +283,7 @@ step_10_preflight() {
   return 0
 }
 
-step_15_prepare_dirs() { se_mkdir_p "$(_dump_dir)" "$(_logs_dir)" || return 74; }
+step_15_prepare_dirs() { __mkpaths "$(_dump_dir)" "$(_logs_dir)" || return 74; }
 
 step_20_optional_scrub() {
   local cfg; cfg="$(se_config_read "$SLUG")"
@@ -278,23 +298,38 @@ step_30_create_snapshot() {
   se_cmd zfs snapshot -r "${DATASET}@${SNAP_NAME}" || return 70
 }
 
+# -------- Disk-backed path (kept for STREAM_MODE=0) ---------------------------
 step_40_full_send_to_dump() {
   local cfg zlvl out_final out_tmp est
   cfg="$(se_config_read "$SLUG")"
   zlvl="$(se_json_get "$cfg" ".ZSTD_LEVEL")"
   out_final="$(_full_path_for "$DATASET")"
   out_tmp="${out_final}.partial"
-  se_mkdir_p "$(dirname "$out_final")" || return 74
+  __mkpaths "$(dirname "$out_final")" || return 74
 
   est="$(_est_send_bytes "${DATASET}@${SNAP_NAME}")"
   local est_human; est_human="$(_numfmt --to=iec --suffix=B "${est:-0}" 2>/dev/null || printf '%s' "${est:-0}")"
   se_log_info "Creating FULL ${DATASET}@${SNAP_NAME} → ${out_final} (est: ${est_human:-unknown})"
 
+  # Build the pipeline & honor DRY_RUN/CONFIRM
+  local show="zfs send -R '${DATASET}@${SNAP_NAME}'"
+  if command -v pv >/dev/null 2>&1; then
+    if [[ -n "$est" ]]; then show+=" | pv -s $est"; else show+=" | pv"; fi
+  fi
+  show+=" | zstd -${zlvl} -T0 > '${out_tmp}'"
+  se_log_cmd "$show"
+  if [[ "${CONFIRM_COMMAND}" == "1" ]]; then se_confirm "Run command? [y/N]" || { se_log_warn "Skipped by user."; return 0; }; fi
+  if [[ "${DRY_RUN}" == "1" ]]; then se_log_info "Dry-run: skipping execution."; return 0; fi
+
   set -o pipefail
-  if [[ -n "$est" ]]; then
-    zfs send -R "${DATASET}@${SNAP_NAME}" | { command -v pv >/dev/null 2>&1 && pv -s "$est" || cat; } | zstd -"${zlvl}" -T0 > "$out_tmp"
+  if command -v pv >/dev/null 2>&1; then
+    if [[ -n "$est" ]]; then
+      zfs send -R "${DATASET}@${SNAP_NAME}" | pv -s "$est" | zstd -"${zlvl}" -T0 > "$out_tmp"
+    else
+      zfs send -R "${DATASET}@${SNAP_NAME}" | pv | zstd -"${zlvl}" -T0 > "$out_tmp"
+    fi
   else
-    zfs send -R "${DATASET}@${SNAP_NAME}" | { command -v pv >/dev/null 2>&1 && pv || cat; } | zstd -"${zlvl}" -T0 > "$out_tmp"
+    zfs send -R "${DATASET}@${SNAP_NAME}" | zstd -"${zlvl}" -T0 > "$out_tmp"
   fi
   local rc=$?; set +o pipefail; (( rc == 0 )) || return 70
 
@@ -302,7 +337,7 @@ step_40_full_send_to_dump() {
   se_log_info "FULL written: $out_final"
 }
 
-# Destroy the snapshot ASAP, *before* verify/upload
+# Destroy the snapshot ASAP, *before* verify/upload (disk path) / after streaming
 step_50_destroy_snapshot_early() {
   if [[ -n "${SNAP_NAME:-}" ]]; then
     se_log_info "Destroying ephemeral snapshot ASAP: ${DATASET}@${SNAP_NAME}"
@@ -334,6 +369,85 @@ step_70_upload_to_r2() {
   se_cmd rclone --config "$(_rclone_conf)" moveto "${remote}:${bucket}/${key}.partial" "${remote}:${bucket}/${key}" || true
 }
 
+# -------- Streaming path (STREAM_MODE=1) --------------------------------------
+step_40_stream_to_r2() {
+  local cfg zlvl remote bucket bw key est est_human
+  cfg="$(se_config_read "$SLUG")"
+  zlvl="$(se_json_get "$cfg" ".ZSTD_LEVEL")"
+  remote="$RCLONE_REMOTE_NAME"
+  bucket="$(se_json_get "$cfg" ".R2_BUCKET")"
+  bw="$(se_json_get "$cfg" ".RCLONE_BWLIMIT")"
+  key="$(_object_key_full "$DATASET")"
+
+  # Estimate size for pv (not exact but useful for progress)
+  est="$(_est_send_bytes "${DATASET}@${SNAP_NAME}")"
+  est_human="$(_numfmt --to=iec --suffix=B "${est:-0}" 2>/dev/null || printf '%s' "${est:-0}")"
+  se_log_info "Streaming FULL ${DATASET}@${SNAP_NAME} → ${key}.partial (est: ${est_human:-unknown})"
+
+  # Show pipeline
+  local show="zfs send -R '${DATASET}@${SNAP_NAME}'"
+  if command -v pv >/dev/null 2>&1; then
+    if [[ -n "$est" ]]; then show+=" | pv -s $est"; else show+=" | pv"; fi
+  fi
+  show+=" | zstd -${zlvl} -T0 | tee >(zstd -q -t - >/dev/null) | rclone rcat '${remote}:${bucket}/${key}.partial' --stats=10s"
+  if [[ -n "$bw" ]]; then show="${show/rcat /rcat --bwlimit $bw }"; fi
+  se_log_cmd "$show"
+
+  if [[ "${CONFIRM_COMMAND}" == "1" ]]; then se_confirm "Run command? [y/N]" || { se_log_warn "Skipped by user."; return 0; }; fi
+  if [[ "${DRY_RUN}" == "1" ]]; then se_log_info "Dry-run: skipping execution."; return 0; fi
+
+  set -o pipefail
+  if command -v pv >/dev/null 2>&1; then
+    if [[ -n "$est" ]]; then
+      zfs send -R "${DATASET}@${SNAP_NAME}" \
+        | pv -s "$est" \
+        | zstd -"${zlvl}" -T0 \
+        | tee >( zstd -q -t - >/dev/null ) \
+        | rclone --config "$(_rclone_conf)" ${bw:+--bwlimit "$bw"} rcat "${remote}:${bucket}/${key}.partial" --stats=10s
+    else
+      zfs send -R "${DATASET}@${SNAP_NAME}" \
+        | pv \
+        | zstd -"${zlvl}" -T0 \
+        | tee >( zstd -q -t - >/dev/null ) \
+        | rclone --config "$(_rclone_conf)" ${bw:+--bwlimit "$bw"} rcat "${remote}:${bucket}/${key}.partial" --stats=10s
+    fi
+  else
+    zfs send -R "${DATASET}@${SNAP_NAME}" \
+      | zstd -"${zlvl}" -T0 \
+      | tee >( zstd -q -t - >/dev/null ) \
+      | rclone --config "$(_rclone_conf)" ${bw:+--bwlimit "$bw"} rcat "${remote}:${bucket}/${key}.partial" --stats=10s
+  fi
+  local rc=$?
+  set +o pipefail
+  if (( rc != 0 )); then
+    se_log_error "Streaming upload failed (code ${rc}). Attempting to delete remote partial…"
+    rclone --config "$(_rclone_conf)" deletefile "${remote}:${bucket}/${key}.partial" >/dev/null 2>&1 || true
+    return 69
+  fi
+
+  # Promote .partial → final
+  se_cmd rclone --config "$(_rclone_conf)" moveto \
+      "${remote}:${bucket}/${key}.partial" \
+      "${remote}:${bucket}/${key}" || return 69
+
+  se_log_info "Streaming upload complete: ${key}"
+}
+
+# Optional remote verify (no disk touch): rclone cat | zstd -t
+step_65_remote_verify_optional() {
+  [[ "${REMOTE_VERIFY:-0}" != "1" ]] && return 0
+  local cfg remote bucket key
+  cfg="$(se_config_read "$SLUG")"
+  remote="$RCLONE_REMOTE_NAME"
+  bucket="$(se_json_get "$cfg" ".R2_BUCKET")"
+  key="$(_object_key_full "$DATASET")"
+  se_log_info "Remote verify (stream): ${key}"
+  if ! rclone --config "$(_rclone_conf)" cat "${remote}:${bucket}/${key}" | zstd -q -t - >/dev/null; then
+    se_log_error "Remote verify failed."
+    return 70
+  fi
+}
+
 # Healthchecks success step (explicit so it's part of ordered steps)
 step_80_healthchecks_success() {
   se_hc_success "$HC_URL"
@@ -344,7 +458,7 @@ step_80_healthchecks_success() {
 # Runners
 # ──────────────────────────────────────────────────────────────────────────────
 _install() {
-  HC_URL="$(se__hc_build_url "$SLUG")"
+  HC_URL="$(se_hc_get_base)"
   se_hc_start "$HC_URL"; HC_SENT_START=1
 
   se_ndjson_init "$SLUG"
@@ -367,26 +481,67 @@ _install() {
 }
 
 _run() {
-  HC_URL="$(se__hc_build_url "$SLUG")"
+  HC_URL="$(se_hc_get_base)"
   se_hc_start "$HC_URL"; HC_SENT_START=1
 
-  se_ndjson_init "$SLUG"
-  if ! se_run_steps \
-      step_10_preflight \
-      step_15_prepare_dirs \
-      step_20_optional_scrub \
-      step_30_create_snapshot \
-      step_40_full_send_to_dump \
-      step_50_destroy_snapshot_early \
-      step_60_verify_local \
-      step_70_upload_to_r2 \
-      step_80_healthchecks_success
-  then
-    local rc=$?
-    se_ndjson_finalize "$VERSION" "$rc" "${START_FROM:-}" "" "fail"
-    if [[ $HC_SENT_FAIL -eq 0 ]]; then se_hc_fail "$HC_URL"; HC_SENT_FAIL=1; fi
-    return "$rc"
+  # Serialize runs so two streams never overlap
+  local lockf="$(_state_dir)/.lock"
+  __mkpaths "$(_state_dir)"
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$lockf" || true
+    if ! flock -n 9; then
+      se_log_warn "Another ${SLUG} run is in progress; exiting."
+      se_ndjson_finalize "$VERSION" 75 "${START_FROM:-}" "" "locked"
+      se_hc_fail "$HC_URL"; HC_SENT_FAIL=1
+      return 75
+    fi
+  else
+    se_log_warn "flock not available; continuing without lock"
   fi
+
+  # Determine STREAM_MODE (env overrides config)
+  local cfg stream
+  cfg="$(se_config_read "$SLUG")"
+  stream="${STREAM_MODE:-$(se_json_get "$cfg" ".STREAM_MODE")}"
+
+  se_ndjson_init "$SLUG"
+  if [[ "$stream" == "1" ]]; then
+    # Pure streaming path
+    if ! se_run_steps \
+        step_10_preflight \
+        step_15_prepare_dirs \
+        step_20_optional_scrub \
+        step_30_create_snapshot \
+        step_40_stream_to_r2 \
+        step_50_destroy_snapshot_early \
+        step_65_remote_verify_optional \
+        step_80_healthchecks_success
+    then
+      local rc=$?
+      se_ndjson_finalize "$VERSION" "$rc" "${START_FROM:-}" "" "fail"
+      if [[ $HC_SENT_FAIL -eq 0 ]]; then se_hc_fail "$HC_URL"; HC_SENT_FAIL=1; fi
+      return "$rc"
+    fi
+  else
+    # Original disk-backed path
+    if ! se_run_steps \
+        step_10_preflight \
+        step_15_prepare_dirs \
+        step_20_optional_scrub \
+        step_30_create_snapshot \
+        step_40_full_send_to_dump \
+        step_50_destroy_snapshot_early \
+        step_60_verify_local \
+        step_70_upload_to_r2 \
+        step_80_healthchecks_success
+    then
+      local rc=$?
+      se_ndjson_finalize "$VERSION" "$rc" "${START_FROM:-}" "" "fail"
+      if [[ $HC_SENT_FAIL -eq 0 ]]; then se_hc_fail "$HC_URL"; HC_SENT_FAIL=1; fi
+      return "$rc"
+    fi
+  fi
+
   se_ndjson_finalize "$VERSION" 0 "${START_FROM:-}" "" "ok"
   return 0
 }
@@ -405,31 +560,40 @@ Commands
   help         Show this help
 
 Snapshot behavior
-  • Snapshot is destroyed immediately after the local dump is completed
-    (BEFORE verification or upload) so Proxmox can fully control snapshots.
+  • Snapshot is destroyed immediately after the dump/stream completes
+    (BEFORE verification or upload in disk-backed mode).
   • A cleanup trap also removes the snapshot on failure or Ctrl-C.
+
+Streaming mode (no disk writes)
+  • Enable via env: STREAM_MODE=1 zfs-r2 run
+  • Or persist in /etc/zfs-r2/config.json[.enc]: "STREAM_MODE": 1
+  • Pipeline: zfs send | pv | zstd | tee >(zstd -t) | rclone rcat → .partial → moveto
+  • Optional remote verification without touching disk: REMOTE_VERIFY=1
 
 Environment (read at install; persisted to config.json[.enc])
 +----------------------+---------------------------------------------+-----------+--------------------------------------------+
 | R2_BUCKET            | zfs                                         | Rec       | R2 bucket name                              |
 | R2_PREFIX            | ""                                          | Opt       | Prefix within bucket                        |
-| R2_ENDPOINT_DEFAULT  | Cloudflare R2 URL                           | Provided  | Default endpoint                             |
-| R2_ENDPOINT          | ""                                          | Opt       | Custom endpoint                              |
-| R2_ACCESS_KEY_ID     | ""                                          | Rec       | Access key                                   |
-| R2_SECRET_ACCESS_KEY | ""                                          | Rec       | Secret key                                   |
-| BACKUP_SCHEDULE      | 03:15                                       | Opt       | Stored only (no scheduler managed)           |
-| RCLONE_BWLIMIT       | 100M                                        | Opt       | rclone bwlimit                                |
-| RCLONE_CHUNK_SIZE    | 128M                                        | Opt       | rclone chunk size                             |
-| ZSTD_LEVEL           | 19                                          | Opt       | zstd compression level                        |
-| RUN_PARANOID_SCRUB   | 0                                           | Opt       | 1 = run zpool scrub before backup            |
-| HEALTHCHECKS_URL     | https://healthchecks.megabyte.space/ping/...| Opt/Def   | Healthchecks endpoint for this job           |
-| UPDATE_URL           | ""                                          | Opt       | Self-update URL for this script               |
+| R2_ENDPOINT_DEFAULT  | Cloudflare R2 URL                           | Provided  | Default endpoint                            |
+| R2_ENDPOINT          | ""                                          | Opt       | Custom endpoint                             |
+| R2_ACCESS_KEY_ID     | ""                                          | Rec       | Access key                                  |
+| R2_SECRET_ACCESS_KEY | ""                                          | Rec       | Secret key                                  |
+| BACKUP_SCHEDULE      | 03:15                                       | Opt       | Stored only (no scheduler managed)          |
+| RCLONE_BWLIMIT       | 100M                                        | Opt       | rclone bwlimit                              |
+| RCLONE_CHUNK_SIZE    | 128M                                        | Opt       | rclone chunk size                           |
+| ZSTD_LEVEL           | 19                                          | Opt       | zstd compression level                      |
+| RUN_PARANOID_SCRUB   | 0                                           | Opt       | 1 = run zpool scrub before backup           |
+| HEALTHCHECKS_URL     | https://healthchecks.megabyte.space/ping/...| Opt/Def   | Healthchecks endpoint for this job          |
+| UPDATE_URL           | ""                                          | Opt       | Self-update URL for this script             |
+| STREAM_MODE          | 0                                           | Opt       | 1 = stream-only mode (no local dump)        |
 +----------------------+---------------------------------------------+-----------+--------------------------------------------+
 
 Examples
   sudo zfs-r2 install
   sudo R2_BUCKET=my-bkt R2_PREFIX=$(hostname -s) zfs-r2 install
   sudo zfs-r2 run
+  sudo STREAM_MODE=1 zfs-r2 run
+  sudo REMOTE_VERIFY=1 STREAM_MODE=1 zfs-r2 run
   sudo CONFIRM_COMMAND=1 zfs-r2 debug
   sudo UPDATE_URL="https://example.org/zfs-r2" zfs-r2 self-update
 

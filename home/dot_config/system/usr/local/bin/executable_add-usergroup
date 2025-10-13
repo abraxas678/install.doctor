@@ -55,6 +55,32 @@ getOS() {
     uname
 }
 
+# @description Find the next available system ID for macOS users or groups
+findNextSystemIdMacos() {
+    local type="$1"      # "Users" or "Groups"
+    local id_field="$2"  # "UniqueID" or "PrimaryGroupID"
+    
+    # Get all existing IDs and find the next available one starting from 500
+    local existing_ids
+    existing_ids=$(dscl . -list "/$type" "$id_field" 2>/dev/null | awk '{print $2}' | grep -E '^[0-9]+$' | sort -n)
+    
+    # Start from 500 for system accounts (below 500 are reserved for system)
+    local next_id=500
+    
+    # Find the next available ID
+    for id in $existing_ids; do
+        if [[ "$id" -ge 500 ]]; then
+            if [[ "$id" -eq "$next_id" ]]; then
+                ((next_id++))
+            elif [[ "$id" -gt "$next_id" ]]; then
+                break
+            fi
+        fi
+    done
+    
+    echo "$next_id"
+}
+
 # @description Create a group on macOS if it doesn't exist
 createMacosGroup() {
     local groupname="$1"

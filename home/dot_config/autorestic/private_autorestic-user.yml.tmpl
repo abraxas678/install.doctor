@@ -63,8 +63,8 @@ extras:
         keep-yearly: 2
 
 locations:
-  {{ $softwarePath := (or (index . "XDG_DATA_HOME") (printf "%s/.local/share" .HOME)) | printf "%s/chezmoi/software.yml" -}}
-  {{- $softwareData := (datasource "yaml" $softwarePath) -}}
+  {{- $softwarePath := (or (env "XDG_DATA_HOME") (printf "%s/.local/share" (env "HOME"))) | printf "%s/chezmoi/software.yml" -}}
+  {{- $softwareData := .chezmoi.sourceDir | printf "%s/software.yml" | include | fromYaml -}}
 
   {{- range $key, $value := $softwareData.softwarePackages -}}
     {{- $envKey := printf "%s_APPDATA" (upper $key) -}}

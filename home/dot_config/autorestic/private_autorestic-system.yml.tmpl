@@ -37,7 +37,7 @@ extras:
         keep-yearly: 1
 
 locations:
-{{- $configDir := .Env.XDG_CONFIG_HOME | default .Env.HOME "/.config" | printf "%s/docker/templates" }}
+{{- $configDir := env "XDG_CONFIG_HOME" | default (env "HOME") | printf "%s/.config/docker/templates" }}
 {{- $folders := .Files.Glob $configDir "*/docker-stack.yml" }}
 
 {{- if eq (len $folders) 1 }}

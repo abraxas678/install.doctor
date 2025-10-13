@@ -107,18 +107,26 @@ validateRcloneConfig() {
   fi
 }
 
-# @description Handles conditional logic for setting file permissions
+# @description Handles conditional logic for setting file permissions and ownership
 setPermissions() {
   if [ "$TYPE" = 'user' ]; then
     FILE_PERMS="0660"
     DIR_PERMS="0770"
+    MOUNT_UID="$(id -u "$USER")"
+    MOUNT_GID="$(id -g rclone)"
   elif [ "$TYPE" = 'volume' ]; then
     if [ "$MOUNT" = 'Private' ]; then
-      FILE_PERMS="0660"
-      DIR_PERMS="0770"
+      FILE_PERMS="0664"
+      DIR_PERMS="0775"
+      # Allow user access by using their UID but rclone group
+      MOUNT_UID="$(id -u "$USER")"
+      MOUNT_GID="$(id -g rclone)"
     elif [ "$MOUNT" = 'Public' ]; then
       FILE_PERMS="0664"
       DIR_PERMS="0775"
+      # Allow user access by using their UID but rclone group
+      MOUNT_UID="$(id -u "$USER")"
+      MOUNT_GID="$(id -g rclone)"
     fi
   fi
 }
@@ -132,8 +140,8 @@ mountRclone() {
   rclone --config "$RCLONE_CONF" \
     mount \
     --allow-other=true \
-    --uid "$(id -u "$USER")" \
-    --gid "$(id -g rclone)" \
+    --uid "$MOUNT_UID" \
+    --gid "$MOUNT_GID" \
     --file-perms "$FILE_PERMS" \
     --dir-perms "$DIR_PERMS" \
     --buffer-size 1G \

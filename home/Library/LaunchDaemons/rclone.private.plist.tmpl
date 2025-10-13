@@ -13,24 +13,24 @@
     <false/>
     <key>PathState</key>
     <dict>
-      <key>/Volumes/Public</key>
+      <key>/Volumes/Private</key>
       <true/>
     </dict>
   </dict>
 	<key>Label</key>
-	<string>rclone.public</string>
+	<string>rclone.private</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/usr/local/bin/rclone-mount</string>
 		<string>volume</string>
-		<string>root</string>
-		<string>Public</string>
+		<string>{{ .user.username }}</string>
+		<string>Private</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
     <key>StandardErrorPath</key>
-	<string>/Library/Logs/public-daemon.error.log</string>
+	<string>/Library/Logs/private-daemon.error.log</string>
 	<key>StandardOutPath</key>
-	<string>/Library/Logs/public-daemon.debug.log</string>
+	<string>/Library/Logs/private-daemon.debug.log</string>
 </dict>
 </plist>

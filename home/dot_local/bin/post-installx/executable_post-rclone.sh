@@ -117,6 +117,17 @@ EOT
 
   if [ -d /Applications ] && [ -d /System ]; then
     if get-secret --exists CLOUDFLARE_R2_ID CLOUDFLARE_R2_SECRET; then
+      ### Ensure mount folders are created
+      gum log -sl info "Ensuring /Volumes/Private is created with proper permissions"
+      sudo mkdir -p "/Volumes/Private"
+      sudo chmod 775 "/Volumes/Private"
+      sudo chown -f "$USER:rclone" "/Volumes/Private"
+
+      gum log -sl info "Ensuring /Volumes/Public is created with proper permissions"
+      sudo mkdir -p "/Volumes/Public"
+      sudo chmod 775 "/Volumes/Public"
+      sudo chown -f "$USER:rclone" "/Volumes/Public"
+
       ### Enable Rclone mounts
       gum log -sl info 'Ensuring Rclone mount-on-reboot definitions are in place'
       sudo mkdir -p /Library/LaunchDaemons
@@ -135,14 +146,16 @@ EOT
   elif [ -d /etc/systemd/system ]; then
     if get-secret --exists CLOUDFLARE_R2_ID CLOUDFLARE_R2_SECRET; then
       ### Ensure mount folder is created
-      gum log -sl info "Ensuring /mnt/s3-private is created with proper permissions"
-      sudo mkdir -p "/mnt/s3-private"
-      sudo chmod 750 "/mnt/s3-private"
+      gum log -sl info "Ensuring /mnt/Private is created with proper permissions"
+      sudo mkdir -p "/mnt/Private"
+      sudo chmod 775 "/mnt/Private"
+      sudo chown -f "$USER:rclone" "/mnt/Private"
 
       ### Ensure mount folder is created
-      gum log -sl info "Ensuring /mnt/s3-public is created with proper permissions"
-      sudo mkdir -p "/mnt/s3-public"
-      sudo chmod 750 "/mnt/s3-public"
+      gum log -sl info "Ensuring /mnt/Public is created with proper permissions"
+      sudo mkdir -p "/mnt/Public"
+      sudo chmod 775 "/mnt/Public"
+      sudo chown -f "$USER:rclone" "/mnt/Public"
 
       ### Enable / restart the service
       gum log -sl info "Enabling / restarting the s3-private S3 service"

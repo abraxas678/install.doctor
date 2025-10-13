@@ -109,7 +109,28 @@ function getPkgData(pref, pkg, installer) {
 
 async function getSoftwareDefinitions() {
   try {
-    return YAML.parse(fs.readFileSync(`${os.homedir()}/.local/share/chezmoi/software.yml`, 'utf8'))
+    // Try to read from chezmoi source directory first
+    const chezmoiSourceDir = `${os.homedir()}/.local/share/chezmoi`
+    const fallbackPath = `${os.homedir()}/.local/share/install.doctor/software.yml`
+    
+    let softwareYmlPath = `${chezmoiSourceDir}/software.yml`
+    
+    // If the file doesn't exist in chezmoi source, try fallback location
+    if (!fs.existsSync(softwareYmlPath)) {
+      if (fs.existsSync(fallbackPath)) {
+        softwareYmlPath = fallbackPath
+      } else {
+        // Try current working directory as last resort
+        const cwdPath = `${process.cwd()}/software.yml`
+        if (fs.existsSync(cwdPath)) {
+          softwareYmlPath = cwdPath
+        } else {
+          throw new Error(`software.yml not found in any of the expected locations: ${softwareYmlPath}, ${fallbackPath}, ${cwdPath}`)
+        }
+      }
+    }
+    
+    return YAML.parse(fs.readFileSync(softwareYmlPath, 'utf8'))
   } catch (e) {
     throw Error('Failed to load software definitions', e)
   }

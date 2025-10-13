@@ -91,8 +91,24 @@ fi
 if command -v gping > /dev/null; then
   alias ping='gping'
 fi
-sudo chown -R root:docker /var/lib/docker-plugins/rclone
-sudo chmod -R 755 /var/lib/docker-plugins/rclone
+
+# Setup rclone docker plugin permissions if docker group exists
+if [ -d /var/lib/docker-plugins/rclone ]; then
+  # Check if docker group exists (cross-platform)
+  if command -v getent > /dev/null 2>&1; then
+    # Linux/Unix systems
+    if getent group docker > /dev/null 2>&1; then
+      sudo chown -R root:docker /var/lib/docker-plugins/rclone
+      sudo chmod -R 755 /var/lib/docker-plugins/rclone
+    fi
+  elif [ -d /Applications ] && [ -d /Library ]; then
+    # macOS - check using dscl
+    if dscl . -read /Groups/docker > /dev/null 2>&1; then
+      sudo chown -R root:docker /var/lib/docker-plugins/rclone
+      sudo chmod -R 755 /var/lib/docker-plugins/rclone
+    fi
+  fi
+fi
 ### safe-rm
 # TODO: Integrate this so it fails gracefully if folder does not exist (i.e. safe-rm -rf ~/Crunch should not return an error)
 # if command -v safe-rm > /dev/null; then

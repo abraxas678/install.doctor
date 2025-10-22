@@ -12217,13 +12217,6 @@ softwarePackages:
     _name: "webfont-kit-generator                                                                                                                                                                                     "
     _short: "webfont-kit-generator is a tool on GitHub by rafaelmardojai for generating web font kits.                                                                                                                 "
     flatpak: com.rafaelmardojai.WebfontKitGenerator
-  webpquicklook:
-    _desc: "WebPQuickLook is a QuickLook plugin for macOS that enables previewing WebP image files in Finder. This plugin allows users to view WebP images without having to open them in a separate application,     \nproviding a convenient way to quickly glance at the contents of WebP files. It enhances the user experience by seamlessly integrating WebP file previews into the macOS Finder interface.                 "
-    _github: https://github.com/emin/WebPQuickLook
-    _name: QLWebP
-    _short: "WebPQuickLook is a Quick Look plugin for macOS that enables previewing WebP image files in Finder.                                                                                                        "
-    _when:cask: '! test -d "$HOME/Library/QuickLook/WebpQuickLook.qlgenerator"'
-    cask: webpquicklook
   websocat:
     _bin: websocat
     _desc: CLI for interacting with web sockets

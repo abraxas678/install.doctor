@@ -357,7 +357,10 @@ function installTask() {
     sudo mkdir -p "$TARGET_BIN_DIR"
     sudo mv "$TMP_DIR/task/task" "$TARGET_DEST"
   else
-    mkdir -p "$TARGET_BIN_DIR"
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || BREW_EXIT_CODE="$?"
+          if [ -d "/opt/homebrew" ]; then
+            logger info "Setting owner of /opt/homebrew to '$USER'" && sudo chown -R "$USER" /opt/homebrew || logger warn "Failed to chown /opt/homebrew to '$USER'"
+          fi
     mv "$TMP_DIR/task/task" "$TARGET_DEST"
   fi
   logger success "Installed Task to $TARGET_DEST"

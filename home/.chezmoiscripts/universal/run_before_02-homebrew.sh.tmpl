@@ -77,10 +77,16 @@ ensurePackageManagerHomebrew() {
     if command -v sudo > /dev/null && sudo -n true; then
       echo | bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
       fixHomebrewPermissions
+      if [ -d "/opt/homebrew" ]; then
+        gum log -sl info "Setting owner of /opt/homebrew to '$USER'" && sudo chown -R "$USER" /opt/homebrew || gum log -sl warn "Failed to chown /opt/homebrew to '$USER'"
+      fi
     else
       gum log -sl info 'Homebrew is not installed. Password may be required.'
       bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || BREW_EXIT_CODE="$?"
       fixHomebrewPermissions
+      if [ -d "/opt/homebrew" ]; then
+        gum log -sl info "Setting owner of /opt/homebrew to '$USER'" && sudo chown -R "$USER" /opt/homebrew || gum log -sl warn "Failed to chown /opt/homebrew to '$USER'"
+      fi
       if [ -n "$BREW_EXIT_CODE" ]; then
         gum log -sl warn 'Homebrew was installed but part of the installation failed to complete successfully.'
         if command -v brew > /dev/null; then

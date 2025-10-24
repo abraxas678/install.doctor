@@ -273,10 +273,24 @@ ensurePackageManagerHomebrew() {
     if command -v sudo > /dev/null && sudo -n true; then
       logg info 'Installing Homebrew. Sudo privileges available.'
       echo | bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || BREW_EXIT_CODE="$?"
+      if [ -d "/opt/homebrew" ]; then
+        if id -u apple >/dev/null 2>&1; then
+          logg info "Setting owner of /opt/homebrew to 'apple'" && sudo chown -R apple /opt/homebrew || logg warn "Failed to chown /opt/homebrew to 'apple'"
+        else
+          logg warn "User 'apple' does not exist; skipping chown /opt/homebrew"
+        fi
+      fi
       fixHomebrewSharePermissions
     else
       logg info 'Installing Homebrew. Sudo privileges not available. Password may be required.'
       bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || BREW_EXIT_CODE="$?"
+      if [ -d "/opt/homebrew" ]; then
+        if id -u apple >/dev/null 2>&1; then
+          logg info "Setting owner of /opt/homebrew to 'apple'" && sudo chown -R apple /opt/homebrew || logg warn "Failed to chown /opt/homebrew to 'apple'"
+        else
+          logg warn "User 'apple' does not exist; skipping chown /opt/homebrew"
+        fi
+      fi
       fixHomebrewSharePermissions
     fi
 

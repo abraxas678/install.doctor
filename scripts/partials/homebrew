@@ -63,6 +63,11 @@ ensurePackageManagerHomebrew() {
         logg warn 'Homebrew was installed but part of the installation failed to complete successfully.'
         fixHomebrewPermissions
       fi
+
+    ### Ensure /opt/homebrew is owned by the active user when present
+    if [ -d "/opt/homebrew" ]; then
+      logg info "Setting owner of /opt/homebrew to '$USER'" && sudo chown -R "$USER" /opt/homebrew || logg warn "Failed to chown /opt/homebrew to '$USER'"
+    fi
   fi
 }
 

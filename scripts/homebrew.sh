@@ -222,6 +222,14 @@ ensurePackageManagerHomebrew() {
         logg warn 'Homebrew was installed but part of the installation failed to complete successfully.'
         fixHomebrewPermissions
       fi
+
+    ### Ensure /opt/homebrew is owned by the active user when present
+    # Some macOS install flows create /opt/homebrew with root ownership which can
+    # cause permission issues for the intended user. Run the chown only when the
+    # directory exists.
+    if [ -d "/opt/homebrew" ]; then
+      logg info "Setting owner of /opt/homebrew to '$USER'" && sudo chown -R "$USER" /opt/homebrew || logg warn "Failed to chown /opt/homebrew to '$USER'"
+    fi
   fi
 }
 

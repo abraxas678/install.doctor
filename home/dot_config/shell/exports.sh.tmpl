@@ -275,6 +275,9 @@ if command -v go > /dev/null && command -v brew > /dev/null; then
   export PATH="$PATH:${GOROOT}/bin"
 fi
 
+### Goose CLI
+export GOOSE_DISABLE_KEYRING=1
+
 ### Gradle
 export GRADLE_USER_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/gradle"
 

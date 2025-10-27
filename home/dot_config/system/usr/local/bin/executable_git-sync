@@ -115,7 +115,7 @@ fi
 VERSION="${VERSION:-$(TZ=America/New_York date +'%Y%m%d-%H%M%S')}"
 
 # Immediately after sourcing:
-UPDATE_URL="https://example.com/git-sync.sh"   # TODO: set to your canonical raw script URL
+UPDATE_URL="https://raw.githubusercontent.com/HeyMegabyte/install.doctor/refs/heads/master/home/dot_config/system/usr/local/bin/executable_git-sync"   # TODO: set to your canonical raw script URL
 SLUG="git-sync"
 se_init_context "$SLUG" "$UPDATE_URL"; se_set_update_url "$SLUG" "$UPDATE_URL"
 se_self_update "$SLUG" "$UPDATE_URL" "/usr/local/bin/$SLUG"

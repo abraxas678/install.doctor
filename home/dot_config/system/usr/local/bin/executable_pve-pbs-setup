@@ -28,13 +28,11 @@ set -o pipefail
 # =========================
 # Defaults (override via env)
 # =========================
-
-# Fixed datastore names per your request — we DO NOT create them, only verify & update.
 PBS_LOCAL_NAME="${PBS_LOCAL_NAME:-pbs-local}"
 R2_DS_NAME="${R2_DS_NAME:-cloudflare-r2}"
 WASABI_DS_NAME="${WASABI_DS_NAME:-wasabi}"
 
-# Retention policy
+# Retention you wanted
 RET_LOCAL_DAILY="${RET_LOCAL_DAILY:-7}"
 RET_LOCAL_WEEKLY="${RET_LOCAL_WEEKLY:-4}"
 RET_LOCAL_MONTHLY="${RET_LOCAL_MONTHLY:-6}"
@@ -42,22 +40,22 @@ RET_LOCAL_MONTHLY="${RET_LOCAL_MONTHLY:-6}"
 RET_S3_DAILY="${RET_S3_DAILY:-7}"
 RET_S3_WEEKLY="${RET_S3_WEEKLY:-4}"
 
-# Schedules (CalendarEvent)
-PRUNE_SCHED="${PRUNE_SCHED:-*-*-* 03:00:00}"      # daily 03:00
-SYNC_SCHED="${SYNC_SCHED:-*-*-* 04:30:00}"        # daily 04:30
-GC_SCHED="${GC_SCHED:-Sun *-*-* 05:10:00}"        # weekly Sun 05:10 (>24h after prune)
+# Schedules
+PRUNE_SCHED="${PRUNE_SCHED:-*-*-* 03:00:00}"      # prune job schedule
+SYNC_SCHED="${SYNC_SCHED:-*-*-* 04:30:00}"        # push sync job schedule
+GC_SCHED="${GC_SCHED:-Sun *-*-* 05:10:00}"        # datastore GC schedule (>24h after prune)  :contentReference[oaicite:1]{index=1}
 
-# Remote for push jobs (self)
+# Self remote (loopback)
 SELF_REMOTE_NAME="${SELF_REMOTE_NAME:-self}"
 SELF_REMOTE_AUTH_ID="${SELF_REMOTE_AUTH_ID:-root@pam}"
 SELF_REMOTE_HOST="${SELF_REMOTE_HOST:-127.0.0.1}"
 SELF_REMOTE_PORT="${SELF_REMOTE_PORT:-8007}"
-SELF_REMOTE_PASSWORD="${SELF_REMOTE_PASSWORD:-}"   # prompt if empty
+SELF_REMOTE_PASSWORD="${SELF_REMOTE_PASSWORD:-}"
 
 # Behavior flags
-RUN_INITIAL_SYNC="${RUN_INITIAL_SYNC:-0}"         # 1 to run sync immediately
-STRICT_DATASTORE_CHECK="${STRICT_DATASTORE_CHECK:-1}" # 1 fail if a datastore missing; 0 = warn and skip
-DRY_RUN="${DRY_RUN:-0}"                           # 1 = print actions but don’t change PBS
+RUN_INITIAL_SYNC="${RUN_INITIAL_SYNC:-0}"
+STRICT_DATASTORE_CHECK="${STRICT_DATASTORE_CHECK:-1}"
+DRY_RUN="${DRY_RUN:-0}"
 CONFIRM_COMMAND="${CONFIRM_COMMAND:-0}"
 
 # =========================
@@ -76,7 +74,6 @@ prompt_if_empty() {
 }
 
 _run() {
-  # Wrapper honoring DRY_RUN and se_cmd logging
   if [[ "$DRY_RUN" == "1" ]]; then
     se_log CMD "(dry-run) $*"
     return 0
@@ -86,15 +83,9 @@ _run() {
 
 fail() { se_log FATAL "$*"; return 70; }
 
-# Parse PBS version like "proxmox-backup-manager 4.1.2" -> 4
-pbs_major_version() {
-  proxmox-backup-manager version 2>/dev/null | awk '{print $2}' | cut -d. -f1
-}
+pbs_major_version() { proxmox-backup-manager version 2>/dev/null | awk '{print $2}' | cut -d. -f1; }
 
-datastore_exists() {
-  local name="$1"
-  proxmox-backup-manager datastore show "$name" >/dev/null 2>&1
-}
+datastore_exists() { proxmox-backup-manager datastore show "$1" >/dev/null 2>&1; }
 
 # =========================
 # Steps
@@ -107,10 +98,9 @@ step_10_install() {
   if [[ -z "$v" ]]; then
     se_log WARN "Could not determine PBS version; continuing"
   elif (( v < 4 )); then
-    fail "PBS $v detected; this script assumes PBS ≥ 4 (S3 + modern scheduling semantics)."
+    fail "PBS $v detected; this script expects PBS ≥ 4 (prune jobs + GC schedules)."
   fi
 
-  # Persist a tiny installer stamp/config
   printf '%s\n' "{\"installed_at\":\"$(TZ=America/New_York date +'%F %T')\",\"update_url\":\"$UPDATE_URL\",\"version\":\"$VERSION\"}" \
     | se_config_write "$SLUG" || return 78
 }
@@ -121,50 +111,75 @@ step_20_collect_config() {
 }
 
 step_30_verify_datastores() {
-  se_log INFO "Verifying required datastores exist (no creation will be attempted)"
-
+  se_log INFO "Verifying that required datastores exist (no creation is performed)"
   local missing=0
   for ds in "$PBS_LOCAL_NAME" "$R2_DS_NAME" "$WASABI_DS_NAME"; do
     if datastore_exists "$ds"; then
       se_log INFO "Found datastore: $ds"
     else
-      se_log ${STRICT_DATASTORE_CHECK:+ERROR} ${STRICT_DATASTORE_CHECK:+"Datastore missing: $ds"} ${STRICT_DATASTORE_CHECK:+"(STRICT_DATASTORE_CHECK=1)"}
+      se_log ${STRICT_DATASTORE_CHECK:+ERROR} ${STRICT_DATASTORE_CHECK:+"Datastore missing: $ds (STRICT_DATASTORE_CHECK=1)"}
       ((missing++))
     fi
   done
-
   if (( missing > 0 )) && [[ "$STRICT_DATASTORE_CHECK" == "1" ]]; then
-    fail "One or more datastores are missing; create them in PBS first and re-run."
+    fail "One or more datastores are missing; create them first and re-run."
   fi
 }
 
-step_40_update_retention_and_schedules() {
-  se_log INFO "Applying retention & schedules to existing datastores"
-
-  # Helper to conditionally update a DS if it exists
-  _update_ds() {
-    local ds="$1" keep_args=("${@:2}")
-    if datastore_exists "$ds"; then
-      _run proxmox-backup-manager datastore update "$ds" \
-        --prune-schedule "$PRUNE_SCHED" \
-        --gc-schedule "$GC_SCHED" \
-        "${keep_args[@]}" || return 70
-    else
-      se_log WARN "Skipping retention/schedule (datastore not found): $ds"
-    fi
-  }
-
-  # Local: 7 daily, 4 weekly, 6 monthly
-  _update_ds "$PBS_LOCAL_NAME" \
-    --keep-daily "$RET_LOCAL_DAILY" \
-    --keep-weekly "$RET_LOCAL_WEEKLY" \
-    --keep-monthly "$RET_LOCAL_MONTHLY"
-
-  # S3s: 7 daily, 4 weekly
-  _update_ds "$R2_DS_NAME"     --keep-daily "$RET_S3_DAILY" --keep-weekly "$RET_S3_WEEKLY"
-  _update_ds "$WASABI_DS_NAME" --keep-daily "$RET_S3_DAILY" --keep-weekly "$RET_S3_WEEKLY"
+# ---- GC: set schedule on datastore (NOT prune) ----
+_update_gc_schedule() {
+  local ds="$1"
+  if datastore_exists "$ds"; then
+    _run proxmox-backup-manager datastore update "$ds" --gc-schedule "$GC_SCHED" || return 70
+  else
+    se_log WARN "Skipping GC schedule (datastore not found): $ds"
+  fi
 }
 
+# ---- Prune Jobs: create/update per datastore with keep-* retention ----
+_create_or_update_prune_job() {
+  local job_id="$1" store="$2" keep_args=("${@:3}")
+  if ! datastore_exists "$store"; then
+    se_log WARN "Skipping prune job '${job_id}' (datastore not found): ${store}"
+    return 0
+  fi
+  if proxmox-backup-manager prune-job show "$job_id" >/dev/null 2>&1; then
+    _run proxmox-backup-manager prune-job update "$job_id" \
+      --store "$store" \
+      --schedule "$PRUNE_SCHED" \
+      "${keep_args[@]}" || return 70
+  else
+    _run proxmox-backup-manager prune-job create "$job_id" \
+      --store "$store" \
+      --schedule "$PRUNE_SCHED" \
+      "${keep_args[@]}" || return 70
+  fi
+}
+
+step_40_configure_prune_and_gc() {
+  se_log INFO "Configuring prune jobs (retention) and GC schedules"
+  # Local retention: 7 daily, 4 weekly, 6 monthly
+  _create_or_update_prune_job "prune-${PBS_LOCAL_NAME}" "$PBS_LOCAL_NAME" \
+    --keep-daily "$RET_LOCAL_DAILY" \
+    --keep-weekly "$RET_LOCAL_WEEKLY" \
+    --keep-monthly "$RET_LOCAL_MONTHLY" || return 70
+
+  # Cloud S3 retention: 7 daily, 4 weekly
+  _create_or_update_prune_job "prune-${R2_DS_NAME}" "$R2_DS_NAME" \
+    --keep-daily "$RET_S3_DAILY" \
+    --keep-weekly "$RET_S3_WEEKLY" || return 70
+
+  _create_or_update_prune_job "prune-${WASABI_DS_NAME}" "$WASABI_DS_NAME" \
+    --keep-daily "$RET_S3_DAILY" \
+    --keep-weekly "$RET_S3_WEEKLY" || return 70
+
+  # GC schedules on each datastore
+  _update_gc_schedule "$PBS_LOCAL_NAME" || return 70
+  _update_gc_schedule "$R2_DS_NAME" || return 70
+  _update_gc_schedule "$WASABI_DS_NAME" || return 70
+}
+
+# ---- Remote (loopback) for push sync ----
 step_50_create_or_update_self_remote() {
   se_log INFO "Ensuring remote '${SELF_REMOTE_NAME}' -> ${SELF_REMOTE_HOST}:${SELF_REMOTE_PORT}"
   if proxmox-backup-manager remote list | grep -q -E "^$SELF_REMOTE_NAME\$"; then
@@ -178,13 +193,13 @@ step_50_create_or_update_self_remote() {
   fi
 }
 
-create_or_update_push_sync() {
+# ---- Push sync jobs ----
+_create_or_update_push_sync() {
   local job_id="$1" target_ds="$2"
   if ! datastore_exists "$target_ds"; then
     se_log WARN "Skipping sync-job '${job_id}' (target datastore not found): ${target_ds}"
     return 0
   fi
-
   se_log INFO "Ensuring push sync job '${job_id}' : ${PBS_LOCAL_NAME} -> ${target_ds}"
   if proxmox-backup-manager sync-job show "$job_id" >/dev/null 2>&1; then
     _run proxmox-backup-manager sync-job update "$job_id" \
@@ -206,8 +221,8 @@ create_or_update_push_sync() {
 }
 
 step_60_sync_jobs() {
-  create_or_update_push_sync "push-to-r2" "$R2_DS_NAME" || return 70
-  create_or_update_push_sync "push-to-wasabi" "$WASABI_DS_NAME" || return 70
+  _create_or_update_push_sync "push-to-r2" "$R2_DS_NAME" || return 70
+  _create_or_update_push_sync "push-to-wasabi" "$WASABI_DS_NAME" || return 70
 }
 
 step_70_initial_sync_optional() {
@@ -221,11 +236,13 @@ step_70_initial_sync_optional() {
 }
 
 step_80_summary() {
-  se_log INFO "Summary (datastores)"
+  se_log INFO "Summary: datastores"
   proxmox-backup-manager datastore list --output-format json-pretty || true
-  se_log INFO "Summary (sync-jobs)"
+  se_log INFO "Summary: prune-jobs"
+  proxmox-backup-manager prune-job list --output-format json-pretty || true
+  se_log INFO "Summary: sync-jobs"
   proxmox-backup-manager sync-job list --output-format json-pretty || true
-  se_log INFO "Completed without datastore creation."
+  se_log INFO "Done. Retention via prune-jobs; GC via datastore schedule."
 }
 
 # =========================
@@ -238,7 +255,7 @@ main() {
       step_10_install \
       step_20_collect_config \
       step_30_verify_datastores \
-      step_40_update_retention_and_schedules \
+      step_40_configure_prune_and_gc \
       step_50_create_or_update_self_remote \
       step_60_sync_jobs \
       step_70_initial_sync_optional \
@@ -261,78 +278,49 @@ case "${1:-run}" in
   recover) se_recover_shell "$SLUG";;
   help)
     cat <<'EOF'
-Proxmox Backup Server — configure retention & push-sync (existing datastores only)
+Proxmox Backup Server — prune jobs + GC schedule + push sync (existing datastores)
 -----------------------------------------------------------------------------------
-This script:
+What this does (idempotent):
   • DOES NOT create datastores.
-  • Verifies that these datastores already exist: pbs-local, cloudflare-r2, wasabi.
-  • Applies retention & schedules:
-      - pbs-local: keep-daily=7, keep-weekly=4, keep-monthly=6; prune 03:00; GC Sun 05:10
-      - cloudflare-r2: keep-daily=7, keep-weekly=4;             prune 03:00; GC Sun 05:10
-      - wasabi:        keep-daily=7, keep-weekly=4;             prune 03:00; GC Sun 05:10
-  • Creates/updates push sync jobs (daily 04:30):
+  • Verifies these exist: pbs-local, cloudflare-r2, wasabi.
+  • Creates/updates PRUNE JOBS (retention & schedule):
+      - pbs-local: keep-daily=7, keep-weekly=4, keep-monthly=6; schedule 03:00
+      - cloudflare-r2: keep-daily=7, keep-weekly=4;               schedule 03:00
+      - wasabi:        keep-daily=7, keep-weekly=4;               schedule 03:00
+  • Sets GC SCHEDULE on each datastore (NOT via prune job): Sunday 05:10 (24h+ after prune).
+  • Creates/updates PUSH SYNC JOBS (schedule 04:30):
       - pbs-local -> cloudflare-r2 (push-to-r2)
       - pbs-local -> wasabi        (push-to-wasabi)
 
-Why GC after prune and next day? Keeps chunk atimes consistent and avoids premature GC.
+Why this change?
+  PBS ≥4 moved retention to “prune jobs”. Datastore “keep-*” flags now error out.
+  GC remains a datastore-level schedule. See: PBS docs (Prune Jobs; GC scheduling).  [docs]
 
-Requirements
-------------
-- Proxmox Backup Server ≥ 4.x (CLI: proxmox-backup-manager)
-- Run as root (or via sudo)
-- The three datastores must already exist with the exact names above.
+Schedules (default)
+  PRUNE_SCHED   "*-*-* 03:00:00"
+  SYNC_SCHED    "*-*-* 04:30:00"
+  GC_SCHED      "Sun *-*-* 05:10:00"
 
-Environment variables (override as needed)
-------------------------------------------
-PBS_LOCAL_NAME            Default: pbs-local
-R2_DS_NAME                Default: cloudflare-r2
-WASABI_DS_NAME            Default: wasabi
-
-RET_LOCAL_DAILY           Default: 7
-RET_LOCAL_WEEKLY          Default: 4
-RET_LOCAL_MONTHLY         Default: 6
-
-RET_S3_DAILY              Default: 7
-RET_S3_WEEKLY             Default: 4
-
-PRUNE_SCHED               Default: *-*-* 03:00:00
-SYNC_SCHED                Default: *-*-* 04:30:00
-GC_SCHED                  Default: Sun *-*-* 05:10:00
-
-SELF_REMOTE_NAME          Default: self
-SELF_REMOTE_AUTH_ID       Default: root@pam
-SELF_REMOTE_HOST          Default: 127.0.0.1
-SELF_REMOTE_PORT          Default: 8007
-SELF_REMOTE_PASSWORD      (prompted if empty)
-
-STRICT_DATASTORE_CHECK    1|0 — fail if a datastore is missing (Default: 1)
-RUN_INITIAL_SYNC          1|0 — run sync immediately after creation/update (Default: 0)
-DRY_RUN                   1|0 — print operations without applying (Default: 0)
-CONFIRM_COMMAND           1|0 — confirm each command in debug mode (Default: 0)
+Environment variables
+  PBS_LOCAL_NAME, R2_DS_NAME, WASABI_DS_NAME
+  RET_LOCAL_DAILY/RET_LOCAL_WEEKLY/RET_LOCAL_MONTHLY
+  RET_S3_DAILY/RET_S3_WEEKLY
+  PRUNE_SCHED, SYNC_SCHED, GC_SCHED
+  SELF_REMOTE_NAME/SELF_REMOTE_AUTH_ID/SELF_REMOTE_HOST/SELF_REMOTE_PORT/SELF_REMOTE_PASSWORD
+  STRICT_DATASTORE_CHECK(=1), RUN_INITIAL_SYNC(=0), DRY_RUN(=0), CONFIRM_COMMAND(=0)
 
 Usage
------
-# stage configuration metadata
-sudo bash pbs-setup.sh install
+  sudo bash pbs-setup.sh install
+  sudo bash pbs-setup.sh run
+  sudo bash pbs-setup.sh debug
+  sudo bash pbs-setup.sh self-update
+  sudo bash pbs-setup.sh uninstall
 
-# apply retention/schedules + push sync jobs (idempotent)
-sudo bash pbs-setup.sh run
+Notes
+  - Keep prune → wait ≥24h → GC, per PBS atime/grace period guidance.
+  - You can change hours to fit your backup window; keep ordering: backup → prune → sync → GC.
 
-# prompt/confirm each action, show verbose logs
-sudo bash pbs-setup.sh debug
-
-# update to canonical version
-sudo bash pbs-setup.sh self-update
-
-# remove Shell Expert state (does not alter PBS)
-sudo bash pbs-setup.sh uninstall
-
-Operational Notes
------------------
-- No datastore creation is attempted. If any are missing, the script fails (default) or warns (STRICT_DATASTORE_CHECK=0).
-- Push jobs use a loopback "self" remote; no network hop required.
-- To protect cloud costs, S3s retain far fewer snapshots than local.
-
+[docs] Prune Jobs & GC schedule are documented in PBS “Maintenance Tasks”.
 EOF
     ;;
   run|*) main "$@";;

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pve-git-sync — GitOps-style config backup for Proxmox VE
+# pve-git-sync — GitOps-style config backup for Proxmox VE / Coolify
 # ==============================================================================
 # Environment Variables (export or set inline)
 #
@@ -63,8 +63,13 @@
 set -Eeuo pipefail
 
 # ------------------------------- Constants -----------------------------------
-DEFAULT_REPO="git@github.com:ProfessorManhattan/proxmox-configs.git"
-DEFAULT_HEALTHCHECK_URL="https://healthchecks.megabyte.space/ping/csjKSM11DRvU5ZjHMmYxYg/proxmox-git-config"
+if [ -d /data/coolify ]; then
+  DEFAULT_HEALTHCHECK_URL="https://healthchecks.megabyte.space/ping/csjKSM11DRvU5ZjHMmYxYg/coolify-git-config"
+  DEFAULT_REPO="git@github.com:ProfessorManhattan/coolify-configs.git"
+elif [ -d /etc/pve ]; then
+  DEFAULT_HEALTHCHECK_URL="https://healthchecks.megabyte.space/ping/csjKSM11DRvU5ZjHMmYxYg/proxmox-git-config"
+  DEFAULT_REPO="git@github.com:ProfessorManhattan/proxmox-configs.git"
+fi
 DEFAULT_TIMER_INTERVAL="15m"
 
 CONF_FILE="/etc/pve-git-sync.conf"
@@ -134,24 +139,34 @@ with_lock() {
 }
 
 # ----------------------- Defaults (overridable via conf) ----------------------
-DEFAULT_SYNC_PATHS=(
-  "/etc/pve"
-  "/etc/network"
-  "/etc/ssh/config"
-  "/root/.ssh/config"
-  "/root/.ssh/*.pub"
-  "/etc/apt"
-  "/etc/fstab"
-  "/etc/hosts"
-  "/etc/resolv.conf"
-  "/etc/hostname"
-  "/etc/pve/firewall"
-  "/etc/corosync"
-  "/etc/ceph"
-  "/etc/chrony"
-  "/etc/systemd/timesyncd.conf"
-)
-
+if [ -d /data/coolify ]; then
+  DEFAULT_SYNC_PATHS=(
+    "/etc/coolify"
+    "/opt/coolify"
+    "/var/lib/coolify"
+    "/var/log/coolify"
+    "/root/.ssh"
+    "/root/.coolify.env"
+    "/data/coolify"
+  )
+elif [ -d /etc/pve ]; then
+  DEFAULT_SYNC_PATHS=(
+    "/etc/pve"
+    "/etc/network"
+    "/etc/ssh/config"
+    "/root/.ssh"
+    "/etc/apt"
+    "/etc/fstab"
+    "/etc/hosts"
+    "/etc/resolv.conf"
+    "/etc/hostname"
+    "/etc/pve/firewall"
+    "/etc/corosync"
+    "/etc/ceph"
+    "/etc/chrony"
+    "/etc/systemd/timesyncd.conf"
+  )
+fi
 REPO=""; WORK_TREE=""; HEALTHCHECK_URL=""; GIT_SIGNING_KEY=""
 SYNC_INTERVAL=""; SYNC_PATHS=()
 
@@ -452,10 +467,35 @@ detect_default_branch() {
 seed_git_files_if_missing() {
   if [[ ! -f "$WORK_TREE/.gitignore" ]]; then
     INFO "Seeding .gitignore (Proxmox-focused)"
-    cat >"$WORK_TREE/.gitignore" <<'EOF'
-# ---- pve-git-sync default ignores (Proxmox-focused) -------------------------
+    if [ -d /data/coolify ]; then
+      cat >"$WORK_TREE/.gitignore" <<'EOF'
+/data/coolify/db.sqlite
+/data/coolify/db.sqlite-journal
+/data/coolify/backups/
+/data/coolify/tmp/
+/data/coolify/volumes/
+/data/coolify/node_modules/
+/data/coolify/*.log
+/data/coolify/*.tar
+/data/coolify/*.gz
+/data/coolify/*.zip
+/data/coolify/*.img
+/data/coolify/*.bin
+/data/coolify/*.qcow2
+/data/coolify/*.raw
+*.log
+*.tmp
+*.bak
+*.old
+.DS_Store
+Thumbs.db
+.cache/
 /root/.ssh/id_*
 /root/.ssh/known_hosts.old
+EOF
+    elif [ -d /etc/pve ]; then
+      cat >"$WORK_TREE/.gitignore" <<'EOF'
+# ---- pve-git-sync default ignores (Proxmox-focused) -------------------------
 /var/lib/vz/images/
 /var/lib/vz/snippets/
 /var/lib/vz/template/iso/
@@ -488,6 +528,7 @@ pbs-chunks/
 .DS_Store
 Thumbs.db
 EOF
+    fi
     (cd "$WORK_TREE" && git add .gitignore && git commit -m "chore: seed Proxmox-focused .gitignore" || true)
   fi
   if [[ ! -f "$WORK_TREE/.gitattributes" ]]; then

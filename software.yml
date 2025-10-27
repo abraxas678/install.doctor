@@ -1180,6 +1180,22 @@ softwarePackages:
     _short: "blocky is a tool for managing and monitoring multiple blockchain nodes easily.                                                                                                                            "
     brew: blocky
     go: github.com/0xERR0R/blocky@mastergithub.com/0xERR0R/blocky@master
+  block-goose:
+    _app: Block Goose.app
+    _bin: null
+    _desc: "Block Goose is a desktop application available via Homebrew Cask. This entry captures the `brew install --cask block-goose` installation method."
+    _github: false
+    _name: Block Goose
+    _short: "Block Goose desktop application (Homebrew cask)."
+    cask: block-goose
+
+  block-goose-cli:
+    _bin: block-goose
+    _desc: "Block Goose CLI — command-line interface for Block Goose. Installable via Homebrew formula."
+    _github: false
+    _name: Block Goose CLI
+    _short: "block-goose command-line interface."
+    brew: block-goose
   blueutil:
     _bin: blueutil
     _desc: "blueutil is a command-line utility for macOS that allows you to control Bluetooth settings. It provides functionalities like turning Bluetooth on or off, querying the status of Bluetooth, and managing  \nconnected devices. This tool can be useful for automating Bluetooth-related tasks or integrating Bluetooth control into scripts. It's a lightweight and handy tool for managing Bluetooth settings on     \nmacOS systems.                                                                                                                                                                                            "

@@ -474,19 +474,55 @@ _commit_with_ai_or_fallback(){
 }
 
 _hbytes(){ awk -v b="$1" 'BEGIN{split("B KiB MiB GiB TiB",u," ");s=1;while(b>=1024&&s<5){b/=1024;s++}printf("%.1f %s",b,u[s])}'; }
+
+# Build exclude list of oversize directories under SIZE_FILTER_BASE:
+# prefer deepest oversize paths; do NOT exclude ancestors if a deeper child
+# is already excluded (e.g., exclude /usr/local/bin but keep /usr/local).
 _build_coolify_dir_excludes(){
   local base="$SIZE_FILTER_BASE"; [[ -d "$base" ]] || return 0
   SIZE_EXCLUDE_FILE="$(mktemp /run/git-sync-excludes.XXXXXX)"; : >"$SIZE_EXCLUDE_FILE"
   STEP "Scanning '${base}' for oversize directories (> $(_hbytes "$MAX_DIR_SIZE_BYTES"), depth ≤ ${MAX_DIR_DEPTH})"
-  while IFS=$'\t' read -r size path; do
-    [[ "$path" == "$base" ]] && continue
-    local rel="${path#$base}"; rel="${rel#/}"; [[ -z "$rel" ]] && continue
-    local depth=$(( 1 + $(grep -o "/" <<<"$rel" | wc -l) ))
-    if (( depth <= MAX_DIR_DEPTH )) && (( size > MAX_DIR_SIZE_BYTES )); then
-      printf '/%s\n' "$rel" >> "$SIZE_EXCLUDE_FILE"; INFO "Excluding (dir) $(_hbytes "$size"): $path (depth $depth)"
-    fi
-  done < <(du -x -B1 --max-depth="$MAX_DIR_DEPTH" "$base" 2>/dev/null | sort -nr | tr '\t' ' ' | awk '{print $1"\t"$2}')
+
+  # Gather candidates: size\tdepth\tpath\trel
+  local tmpfile; tmpfile="$(mktemp /run/git-sync-du.XXXXXX)"
+  du -x -B1 --max-depth="$MAX_DIR_DEPTH" "$base" 2>/dev/null | awk -v base="$base" '
+    BEGIN{ OFS="\t" }
+    {
+      size=$1; $1="";
+      # find start of path (fields may be squeezed)
+      path=$0; sub(/^[ \t]+/,"",path);
+      if (path==base) next;
+      rel=path; sub("^" base "/?","",rel);
+      if (rel=="") next;
+      n=split(rel, comps, "/"); depth=n;
+      print size, depth, path, rel
+    }' > "$tmpfile"
+
+  # Filter oversize; sort deepest-first, then size desc
+  mapfile -t rows < <(awk -F'\t' -v thr="$MAX_DIR_SIZE_BYTES" '$1>thr {print}' "$tmpfile" | sort -t$'\t' -k2,2nr -k1,1nr)
+
+  local selected=() r size depth path rel
+  for r in "${rows[@]}"; do
+    IFS=$'\t' read -r size depth path rel <<<"$r"
+    local skip=0 s
+    for s in "${selected[@]}"; do
+      if [[ "$s" == "$rel" || "$s" == "$rel"/* ]]; then
+        # A deeper child already selected; don't exclude this ancestor
+        skip=1; break
+      fi
+    done
+    (( skip )) && { INFO "Not excluding parent (child already excluded): $path"; continue; }
+    selected+=("$rel")
+  done
+
+  local relp
+  for relp in "${selected[@]}"; do
+    printf '/%s\n' "$relp" >> "$SIZE_EXCLUDE_FILE"
+    INFO "Excluding (dir) $base/$relp"
+  done
+
   INFO "Oversize directory patterns: $(wc -l < "$SIZE_EXCLUDE_FILE" | tr -d ' ')"
+  rm -f "$tmpfile" || true
 }
 
 _perform_sync(){

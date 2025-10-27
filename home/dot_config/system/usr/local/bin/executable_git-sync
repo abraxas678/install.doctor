@@ -115,8 +115,8 @@ fi
 VERSION="${VERSION:-$(TZ=America/New_York date +'%Y%m%d-%H%M%S')}"
 
 # Immediately after sourcing:
-UPDATE_URL="https://raw.githubusercontent.com/HeyMegabyte/install.doctor/refs/heads/master/home/dot_config/system/usr/local/bin/executable_git-sync"   # TODO: set to your canonical raw script URL
-SLUG="$(se_slug_from_url "$UPDATE_URL")"
+UPDATE_URL="https://example.com/git-sync.sh"   # TODO: set to your canonical raw script URL
+SLUG="git-sync"
 se_init_context "$SLUG" "$UPDATE_URL"; se_set_update_url "$SLUG" "$UPDATE_URL"
 se_self_update "$SLUG" "$UPDATE_URL" "/usr/local/bin/$SLUG"
 
@@ -534,7 +534,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=${0} run
+ExecStart=/usr/local/bin/${SLUG} run
 User=root
 Group=root
 EnvironmentFile=-${CONF_FILE}
@@ -615,7 +615,7 @@ USAGE
 
 case "${1:-run}" in
   install)     MODE=install _main ;;
-  run|"")    MODE=run _main ;;
+  run|"")      MODE=run _main ;;
   status)      _cfg_load; _hc_start; _show_status; _hc_ok ;;
   uninstall)   _cfg_load; _hc_start; _uninstall_units; _hc_ok ;;
   self-update) se_self_update "$SLUG" "$UPDATE_URL" "/usr/local/bin/$SLUG" ;;

@@ -262,7 +262,7 @@ _hc_fail(){ local base="${HEALTHCHECK_URL%/}/fail"; _hc_post_file "$base" "$LOG_
 # --- Dependencies ------------------------------------------------------------
 _ensure_deps(){
   STEP "Ensuring required packages"
-  se_ensure_cmds git rsync openssh-client curl jq || return 69
+  se_ensure_cmds git rsync curl jq || return 69
   if ! command -v node >/dev/null || ! command -v npm >/dev/null; then
     INFO "Installing Node.js + npm via system package manager"
     if ! se_ensure_cmds nodejs npm; then WARN "Could not auto-install nodejs/npm"; fi

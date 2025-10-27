@@ -18,7 +18,8 @@ if [[ -n "$P" && -r "$P" ]]; then . "$P"; else
 fi
 VERSION="${VERSION:-$(TZ=America/New_York date +'%Y%m%d-%H%M%S')}"
 
-UPDATE_URL="https://example.com/pbs-setup.sh"  # set to your canonical URL if you host this
+# Canonical URL for self-update (per your request)
+UPDATE_URL="https://raw.githubusercontent.com/HeyMegabyte/install.doctor/refs/heads/master/home/dot_config/system/usr/local/bin/executable_pve-pbs-setup"
 SLUG="$(se_slug_from_url "$UPDATE_URL")"
 se_init_context "$SLUG" "$UPDATE_URL"; se_set_update_url "$SLUG" "$UPDATE_URL"
 se_self_update "$SLUG" "$UPDATE_URL" "/usr/local/bin/$SLUG"
@@ -32,7 +33,7 @@ PBS_LOCAL_NAME="${PBS_LOCAL_NAME:-pbs-local}"
 R2_DS_NAME="${R2_DS_NAME:-cloudflare-r2}"
 WASABI_DS_NAME="${WASABI_DS_NAME:-wasabi}"
 
-# Retention you wanted
+# Retention (your requested policy)
 RET_LOCAL_DAILY="${RET_LOCAL_DAILY:-7}"
 RET_LOCAL_WEEKLY="${RET_LOCAL_WEEKLY:-4}"
 RET_LOCAL_MONTHLY="${RET_LOCAL_MONTHLY:-6}"
@@ -40,17 +41,17 @@ RET_LOCAL_MONTHLY="${RET_LOCAL_MONTHLY:-6}"
 RET_S3_DAILY="${RET_S3_DAILY:-7}"
 RET_S3_WEEKLY="${RET_S3_WEEKLY:-4}"
 
-# Schedules
-PRUNE_SCHED="${PRUNE_SCHED:-*-*-* 03:00:00}"      # prune job schedule
-SYNC_SCHED="${SYNC_SCHED:-*-*-* 04:30:00}"        # push sync job schedule
-GC_SCHED="${GC_SCHED:-Sun *-*-* 05:10:00}"        # datastore GC schedule (>24h after prune)  :contentReference[oaicite:1]{index=1}
+# Schedules (CalendarEvent format)
+PRUNE_SCHED="${PRUNE_SCHED:-*-*-* 03:00:00}"      # daily 03:00
+SYNC_SCHED="${SYNC_SCHED:-*-*-* 04:30:00}"        # daily 04:30
+GC_SCHED="${GC_SCHED:-Sun *-*-* 05:10:00}"        # weekly Sunday 05:10 (≥24h after prune)
 
-# Self remote (loopback)
+# Loopback remote for push jobs
 SELF_REMOTE_NAME="${SELF_REMOTE_NAME:-self}"
 SELF_REMOTE_AUTH_ID="${SELF_REMOTE_AUTH_ID:-root@pam}"
 SELF_REMOTE_HOST="${SELF_REMOTE_HOST:-127.0.0.1}"
 SELF_REMOTE_PORT="${SELF_REMOTE_PORT:-8007}"
-SELF_REMOTE_PASSWORD="${SELF_REMOTE_PASSWORD:-}"
+SELF_REMOTE_PASSWORD="${SELF_REMOTE_PASSWORD:-}"   # prompted if empty
 
 # Behavior flags
 RUN_INITIAL_SYNC="${RUN_INITIAL_SYNC:-0}"
@@ -106,7 +107,7 @@ step_10_install() {
 }
 
 step_20_collect_config() {
-  se_log INFO "Collecting credentials for remote '${SELF_REMOTE_NAME}' (self push)"
+  se_log INFO "Collecting credentials for remote '${SELF_REMOTE_NAME}' (loopback push)"
   prompt_if_empty SELF_REMOTE_PASSWORD "PBS password/API token for ${SELF_REMOTE_AUTH_ID}@${SELF_REMOTE_HOST}:${SELF_REMOTE_PORT}" 1
 }
 
@@ -117,12 +118,12 @@ step_30_verify_datastores() {
     if datastore_exists "$ds"; then
       se_log INFO "Found datastore: $ds"
     else
-      se_log ${STRICT_DATASTORE_CHECK:+ERROR} ${STRICT_DATASTORE_CHECK:+"Datastore missing: $ds (STRICT_DATASTORE_CHECK=1)"}
+      se_log ${STRICT_DATASTORE_CHECK:+ERROR} ${STRICT_DATASTORE_CHECK:+"Datastore missing: $ds (STRICT_DATASTORE_CHECK=1)"} || true
       ((missing++))
     fi
   done
   if (( missing > 0 )) && [[ "$STRICT_DATASTORE_CHECK" == "1" ]]; then
-    fail "One or more datastores are missing; create them first and re-run."
+    fail "One or more datastores are missing; create them in PBS first and re-run."
   fi
 }
 
@@ -242,7 +243,7 @@ step_80_summary() {
   proxmox-backup-manager prune-job list --output-format json-pretty || true
   se_log INFO "Summary: sync-jobs"
   proxmox-backup-manager sync-job list --output-format json-pretty || true
-  se_log INFO "Done. Retention via prune-jobs; GC via datastore schedule."
+  se_log INFO "Done. Retention via prune-jobs; GC via datastore schedule; push-sync configured."
 }
 
 # =========================
@@ -277,50 +278,29 @@ case "${1:-run}" in
   self-update) se_self_update "$SLUG" "$UPDATE_URL" "/usr/local/bin/$SLUG";;
   recover) se_recover_shell "$SLUG";;
   help)
+    sed -n '1,160p' "$0" | sed 's/^# //; s/^#//'   # Print the pretty docs from the top of this file
     cat <<'EOF'
-Proxmox Backup Server — prune jobs + GC schedule + push sync (existing datastores)
------------------------------------------------------------------------------------
-What this does (idempotent):
-  • DOES NOT create datastores.
-  • Verifies these exist: pbs-local, cloudflare-r2, wasabi.
-  • Creates/updates PRUNE JOBS (retention & schedule):
-      - pbs-local: keep-daily=7, keep-weekly=4, keep-monthly=6; schedule 03:00
-      - cloudflare-r2: keep-daily=7, keep-weekly=4;               schedule 03:00
-      - wasabi:        keep-daily=7, keep-weekly=4;               schedule 03:00
-  • Sets GC SCHEDULE on each datastore (NOT via prune job): Sunday 05:10 (24h+ after prune).
-  • Creates/updates PUSH SYNC JOBS (schedule 04:30):
-      - pbs-local -> cloudflare-r2 (push-to-r2)
-      - pbs-local -> wasabi        (push-to-wasabi)
 
-Why this change?
-  PBS ≥4 moved retention to “prune jobs”. Datastore “keep-*” flags now error out.
-  GC remains a datastore-level schedule. See: PBS docs (Prune Jobs; GC scheduling).  [docs]
+──────────────────────────────────────────────────────────────────────────────
+CLI Quick Reference
+──────────────────────────────────────────────────────────────────────────────
+• Prune jobs (retention & schedule)
+    proxmox-backup-manager prune-job create|update <job-id> \
+      --store <datastore> --schedule "<CalendarEvent>" \
+      [--keep-daily N] [--keep-weekly N] [--keep-monthly N]
 
-Schedules (default)
-  PRUNE_SCHED   "*-*-* 03:00:00"
-  SYNC_SCHED    "*-*-* 04:30:00"
-  GC_SCHED      "Sun *-*-* 05:10:00"
+• GC schedule (per datastore)
+    proxmox-backup-manager datastore update <datastore> --gc-schedule "<CalendarEvent>"
 
-Environment variables
-  PBS_LOCAL_NAME, R2_DS_NAME, WASABI_DS_NAME
-  RET_LOCAL_DAILY/RET_LOCAL_WEEKLY/RET_LOCAL_MONTHLY
-  RET_S3_DAILY/RET_S3_WEEKLY
-  PRUNE_SCHED, SYNC_SCHED, GC_SCHED
-  SELF_REMOTE_NAME/SELF_REMOTE_AUTH_ID/SELF_REMOTE_HOST/SELF_REMOTE_PORT/SELF_REMOTE_PASSWORD
-  STRICT_DATASTORE_CHECK(=1), RUN_INITIAL_SYNC(=0), DRY_RUN(=0), CONFIRM_COMMAND(=0)
+• Push sync jobs
+    proxmox-backup-manager sync-job create|update <job-id> \
+      --remote <remote-name> --remote-store <source-ds> --store <target-ds> \
+      --sync-direction push --schedule "<CalendarEvent>" [--remove-vanished 0|1]
 
-Usage
-  sudo bash pbs-setup.sh install
-  sudo bash pbs-setup.sh run
-  sudo bash pbs-setup.sh debug
-  sudo bash pbs-setup.sh self-update
-  sudo bash pbs-setup.sh uninstall
+• Remote (loopback)
+    proxmox-backup-manager remote create|update <remote-name> \
+      --host 127.0.0.1 --port 8007 --auth-id root@pam --password <token-or-pass>
 
-Notes
-  - Keep prune → wait ≥24h → GC, per PBS atime/grace period guidance.
-  - You can change hours to fit your backup window; keep ordering: backup → prune → sync → GC.
-
-[docs] Prune Jobs & GC schedule are documented in PBS “Maintenance Tasks”.
 EOF
     ;;
   run|*) main "$@";;

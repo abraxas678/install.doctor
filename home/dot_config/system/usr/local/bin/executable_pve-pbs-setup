@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+U="${SE_LIB_URL:-https://public.megabyte.space/source.sh}"
+P="${SE_LIB_PATH:-}"
+if [[ -n "$P" && -r "$P" ]]; then . "$P"; else
+  C=(/usr/local/lib/shell-expert/source.sh ./source.sh "${XDG_CACHE_HOME:-$HOME/.cache}/shell-expert/source.sh")
+  for p in "${C[@]}"; do [[ -r "$p" ]] && { . "$p"; P="$p"; break; }; done
+  if [[ -z "$P" ]]; then
+    D="${XDG_CACHE_HOME:-$HOME/.cache}/shell-expert"; mkdir -p "$D" || { printf 'ERR: cache\n' >&2; exit 74; }
+    T="$(mktemp "$D/.dl.XXXX")" || { printf 'ERR: mktemp\n' >&2; exit 70; }
+    if command -v curl >/dev/null; then curl -fsS --connect-timeout 5 -m 20 --retry 3 --retry-all-errors -o "$T" "$U" || { printf 'ERR: fetch\n' >&2; exit 69; }
+    elif command -v wget >/dev/null; then wget -q -O "$T" "$U" || { printf 'ERR: fetch\n' >&2; exit 69; }
+    else printf 'ERR: need curl/wget\n' >&2; exit 69; fi
+    bash -n "$T" || { printf 'ERR: syntax\n' >&2; exit 70; }
+    P="$D/source.sh"; mv -f "$T" "$P"; chmod 0644 "$P" || true
+    [[ -d /usr/local/lib && -w /usr/local/lib ]] && { mkdir -p /usr/local/lib/shell-expert 2>/dev/null || true; cp -f "$P" /usr/local/lib/shell-expert/source.sh 2>/dev/null || true; }
+    . "$P"
+  fi
+fi
+VERSION="${VERSION:-$(TZ=America/New_York date +'%Y%m%d-%H%M%S')}"
+
+UPDATE_URL="https://example.com/pbs-setup.sh"  # set to your canonical URL if you host this
+SLUG="$(se_slug_from_url "$UPDATE_URL")"
+se_init_context "$SLUG" "$UPDATE_URL"; se_set_update_url "$SLUG" "$UPDATE_URL"
+se_self_update "$SLUG" "$UPDATE_URL" "/usr/local/bin/$SLUG"
+
+set -o pipefail
+
+# =========================
+# Defaults (override via env)
+# =========================
+
+# Fixed datastore names per your request — we DO NOT create them, only verify & update.
+PBS_LOCAL_NAME="${PBS_LOCAL_NAME:-pbs-local}"
+R2_DS_NAME="${R2_DS_NAME:-cloudflare-r2}"
+WASABI_DS_NAME="${WASABI_DS_NAME:-wasabi}"
+
+# Retention policy
+RET_LOCAL_DAILY="${RET_LOCAL_DAILY:-7}"
+RET_LOCAL_WEEKLY="${RET_LOCAL_WEEKLY:-4}"
+RET_LOCAL_MONTHLY="${RET_LOCAL_MONTHLY:-6}"
+
+RET_S3_DAILY="${RET_S3_DAILY:-7}"
+RET_S3_WEEKLY="${RET_S3_WEEKLY:-4}"
+
+# Schedules (CalendarEvent)
+PRUNE_SCHED="${PRUNE_SCHED:-*-*-* 03:00:00}"      # daily 03:00
+SYNC_SCHED="${SYNC_SCHED:-*-*-* 04:30:00}"        # daily 04:30
+GC_SCHED="${GC_SCHED:-Sun *-*-* 05:10:00}"        # weekly Sun 05:10 (>24h after prune)
+
+# Remote for push jobs (self)
+SELF_REMOTE_NAME="${SELF_REMOTE_NAME:-self}"
+SELF_REMOTE_AUTH_ID="${SELF_REMOTE_AUTH_ID:-root@pam}"
+SELF_REMOTE_HOST="${SELF_REMOTE_HOST:-127.0.0.1}"
+SELF_REMOTE_PORT="${SELF_REMOTE_PORT:-8007}"
+SELF_REMOTE_PASSWORD="${SELF_REMOTE_PASSWORD:-}"   # prompt if empty
+
+# Behavior flags
+RUN_INITIAL_SYNC="${RUN_INITIAL_SYNC:-0}"         # 1 to run sync immediately
+STRICT_DATASTORE_CHECK="${STRICT_DATASTORE_CHECK:-1}" # 1 fail if a datastore missing; 0 = warn and skip
+DRY_RUN="${DRY_RUN:-0}"                           # 1 = print actions but don’t change PBS
+CONFIRM_COMMAND="${CONFIRM_COMMAND:-0}"
+
+# =========================
+# Helpers
+# =========================
+require_cmds=(proxmox-backup-manager jq)
+
+prompt_if_empty() {
+  local var="$1" prompt="$2" secret="${3:-0}" val
+  val="${!var}"
+  if [[ -z "$val" ]]; then
+    if [[ "$secret" == "1" ]]; then read -r -s -p "$prompt: " val; printf '\n'
+    else read -r -p "$prompt: " val; fi
+    printf -v "$var" '%s' "$val"; export "$var"
+  fi
+}
+
+_run() {
+  # Wrapper honoring DRY_RUN and se_cmd logging
+  if [[ "$DRY_RUN" == "1" ]]; then
+    se_log CMD "(dry-run) $*"
+    return 0
+  fi
+  se_cmd "$@"
+}
+
+fail() { se_log FATAL "$*"; return 70; }
+
+# Parse PBS version like "proxmox-backup-manager 4.1.2" -> 4
+pbs_major_version() {
+  proxmox-backup-manager version 2>/dev/null | awk '{print $2}' | cut -d. -f1
+}
+
+datastore_exists() {
+  local name="$1"
+  proxmox-backup-manager datastore show "$name" >/dev/null 2>&1
+}
+
+# =========================
+# Steps
+# =========================
+step_10_install() {
+  se_log INFO "Ensuring dependencies present"
+  se_ensure_cmds "${require_cmds[@]}" || return 69
+
+  local v; v="$(pbs_major_version || true)"
+  if [[ -z "$v" ]]; then
+    se_log WARN "Could not determine PBS version; continuing"
+  elif (( v < 4 )); then
+    fail "PBS $v detected; this script assumes PBS ≥ 4 (S3 + modern scheduling semantics)."
+  fi
+
+  # Persist a tiny installer stamp/config
+  printf '%s\n' "{\"installed_at\":\"$(TZ=America/New_York date +'%F %T')\",\"update_url\":\"$UPDATE_URL\",\"version\":\"$VERSION\"}" \
+    | se_config_write "$SLUG" || return 78
+}
+
+step_20_collect_config() {
+  se_log INFO "Collecting credentials for remote '${SELF_REMOTE_NAME}' (self push)"
+  prompt_if_empty SELF_REMOTE_PASSWORD "PBS password/API token for ${SELF_REMOTE_AUTH_ID}@${SELF_REMOTE_HOST}:${SELF_REMOTE_PORT}" 1
+}
+
+step_30_verify_datastores() {
+  se_log INFO "Verifying required datastores exist (no creation will be attempted)"
+
+  local missing=0
+  for ds in "$PBS_LOCAL_NAME" "$R2_DS_NAME" "$WASABI_DS_NAME"; do
+    if datastore_exists "$ds"; then
+      se_log INFO "Found datastore: $ds"
+    else
+      se_log ${STRICT_DATASTORE_CHECK:+ERROR} ${STRICT_DATASTORE_CHECK:+"Datastore missing: $ds"} ${STRICT_DATASTORE_CHECK:+"(STRICT_DATASTORE_CHECK=1)"}
+      ((missing++))
+    fi
+  done
+
+  if (( missing > 0 )) && [[ "$STRICT_DATASTORE_CHECK" == "1" ]]; then
+    fail "One or more datastores are missing; create them in PBS first and re-run."
+  fi
+}
+
+step_40_update_retention_and_schedules() {
+  se_log INFO "Applying retention & schedules to existing datastores"
+
+  # Helper to conditionally update a DS if it exists
+  _update_ds() {
+    local ds="$1" keep_args=("${@:2}")
+    if datastore_exists "$ds"; then
+      _run proxmox-backup-manager datastore update "$ds" \
+        --prune-schedule "$PRUNE_SCHED" \
+        --gc-schedule "$GC_SCHED" \
+        "${keep_args[@]}" || return 70
+    else
+      se_log WARN "Skipping retention/schedule (datastore not found): $ds"
+    fi
+  }
+
+  # Local: 7 daily, 4 weekly, 6 monthly
+  _update_ds "$PBS_LOCAL_NAME" \
+    --keep-daily "$RET_LOCAL_DAILY" \
+    --keep-weekly "$RET_LOCAL_WEEKLY" \
+    --keep-monthly "$RET_LOCAL_MONTHLY"
+
+  # S3s: 7 daily, 4 weekly
+  _update_ds "$R2_DS_NAME"     --keep-daily "$RET_S3_DAILY" --keep-weekly "$RET_S3_WEEKLY"
+  _update_ds "$WASABI_DS_NAME" --keep-daily "$RET_S3_DAILY" --keep-weekly "$RET_S3_WEEKLY"
+}
+
+step_50_create_or_update_self_remote() {
+  se_log INFO "Ensuring remote '${SELF_REMOTE_NAME}' -> ${SELF_REMOTE_HOST}:${SELF_REMOTE_PORT}"
+  if proxmox-backup-manager remote list | grep -q -E "^$SELF_REMOTE_NAME\$"; then
+    _run proxmox-backup-manager remote update "$SELF_REMOTE_NAME" \
+      --host "$SELF_REMOTE_HOST" --port "$SELF_REMOTE_PORT" \
+      --auth-id "$SELF_REMOTE_AUTH_ID" --password "$SELF_REMOTE_PASSWORD" || return 70
+  else
+    _run proxmox-backup-manager remote create "$SELF_REMOTE_NAME" \
+      --host "$SELF_REMOTE_HOST" --port "$SELF_REMOTE_PORT" \
+      --auth-id "$SELF_REMOTE_AUTH_ID" --password "$SELF_REMOTE_PASSWORD" || return 70
+  fi
+}
+
+create_or_update_push_sync() {
+  local job_id="$1" target_ds="$2"
+  if ! datastore_exists "$target_ds"; then
+    se_log WARN "Skipping sync-job '${job_id}' (target datastore not found): ${target_ds}"
+    return 0
+  fi
+
+  se_log INFO "Ensuring push sync job '${job_id}' : ${PBS_LOCAL_NAME} -> ${target_ds}"
+  if proxmox-backup-manager sync-job show "$job_id" >/dev/null 2>&1; then
+    _run proxmox-backup-manager sync-job update "$job_id" \
+      --remote "$SELF_REMOTE_NAME" \
+      --remote-store "$PBS_LOCAL_NAME" \
+      --store "$target_ds" \
+      --sync-direction push \
+      --schedule "$SYNC_SCHED" \
+      --remove-vanished 0 || return 70
+  else
+    _run proxmox-backup-manager sync-job create "$job_id" \
+      --remote "$SELF_REMOTE_NAME" \
+      --remote-store "$PBS_LOCAL_NAME" \
+      --store "$target_ds" \
+      --sync-direction push \
+      --schedule "$SYNC_SCHED" \
+      --remove-vanished 0 || return 70
+  fi
+}
+
+step_60_sync_jobs() {
+  create_or_update_push_sync "push-to-r2" "$R2_DS_NAME" || return 70
+  create_or_update_push_sync "push-to-wasabi" "$WASABI_DS_NAME" || return 70
+}
+
+step_70_initial_sync_optional() {
+  if [[ "$RUN_INITIAL_SYNC" == "1" ]]; then
+    se_log INFO "Running initial sync jobs now…"
+    _run proxmox-backup-manager sync-job run push-to-r2 || return 70
+    _run proxmox-backup-manager sync-job run push-to-wasabi || return 70
+  else
+    se_log INFO "Initial sync skipped (set RUN_INITIAL_SYNC=1 to run immediately)"
+  fi
+}
+
+step_80_summary() {
+  se_log INFO "Summary (datastores)"
+  proxmox-backup-manager datastore list --output-format json-pretty || true
+  se_log INFO "Summary (sync-jobs)"
+  proxmox-backup-manager sync-job list --output-format json-pretty || true
+  se_log INFO "Completed without datastore creation."
+}
+
+# =========================
+# Harness
+# =========================
+main() {
+  local hc; hc="$(se__hc_build_url "$SLUG")"; se_hc_start "$hc"
+  se_ndjson_init "$SLUG"
+  if ! se_run_steps \
+      step_10_install \
+      step_20_collect_config \
+      step_30_verify_datastores \
+      step_40_update_retention_and_schedules \
+      step_50_create_or_update_self_remote \
+      step_60_sync_jobs \
+      step_70_initial_sync_optional \
+      step_80_summary; then
+    local rc=$?; se_ndjson_finalize "$VERSION" "$rc" "${START_FROM:-}" "" "fail"; se_hc_fail "$hc"; return "$rc"
+  fi
+  se_ndjson_finalize "$VERSION" 0 "${START_FROM:-}" "" "ok"; se_hc_success "$hc"; return 0
+}
+
+case "${1:-run}" in
+  install)
+    printf '%s\n' "{\"installed_at\":\"$(TZ=America/New_York date +'%F %T')\",\"update_url\":\"$UPDATE_URL\",\"version\":\"$VERSION\"}" \
+      | se_config_write "$SLUG"
+    ;;
+  debug) DEBUG=1 CONFIRM_COMMAND=${CONFIRM_COMMAND:-1} main "$@";;
+  uninstall)
+    rm -rf "$(se_xdg_config_dir "$SLUG")" "$(se_xdg_state_dir "$SLUG")" "$(se_xdg_cache_dir "$SLUG")"
+    ;;
+  self-update) se_self_update "$SLUG" "$UPDATE_URL" "/usr/local/bin/$SLUG";;
+  recover) se_recover_shell "$SLUG";;
+  help)
+    cat <<'EOF'
+Proxmox Backup Server — configure retention & push-sync (existing datastores only)
+-----------------------------------------------------------------------------------
+This script:
+  • DOES NOT create datastores.
+  • Verifies that these datastores already exist: pbs-local, cloudflare-r2, wasabi.
+  • Applies retention & schedules:
+      - pbs-local: keep-daily=7, keep-weekly=4, keep-monthly=6; prune 03:00; GC Sun 05:10
+      - cloudflare-r2: keep-daily=7, keep-weekly=4;             prune 03:00; GC Sun 05:10
+      - wasabi:        keep-daily=7, keep-weekly=4;             prune 03:00; GC Sun 05:10
+  • Creates/updates push sync jobs (daily 04:30):
+      - pbs-local -> cloudflare-r2 (push-to-r2)
+      - pbs-local -> wasabi        (push-to-wasabi)
+
+Why GC after prune and next day? Keeps chunk atimes consistent and avoids premature GC.
+
+Requirements
+------------
+- Proxmox Backup Server ≥ 4.x (CLI: proxmox-backup-manager)
+- Run as root (or via sudo)
+- The three datastores must already exist with the exact names above.
+
+Environment variables (override as needed)
+------------------------------------------
+PBS_LOCAL_NAME            Default: pbs-local
+R2_DS_NAME                Default: cloudflare-r2
+WASABI_DS_NAME            Default: wasabi
+
+RET_LOCAL_DAILY           Default: 7
+RET_LOCAL_WEEKLY          Default: 4
+RET_LOCAL_MONTHLY         Default: 6
+
+RET_S3_DAILY              Default: 7
+RET_S3_WEEKLY             Default: 4
+
+PRUNE_SCHED               Default: *-*-* 03:00:00
+SYNC_SCHED                Default: *-*-* 04:30:00
+GC_SCHED                  Default: Sun *-*-* 05:10:00
+
+SELF_REMOTE_NAME          Default: self
+SELF_REMOTE_AUTH_ID       Default: root@pam
+SELF_REMOTE_HOST          Default: 127.0.0.1
+SELF_REMOTE_PORT          Default: 8007
+SELF_REMOTE_PASSWORD      (prompted if empty)
+
+STRICT_DATASTORE_CHECK    1|0 — fail if a datastore is missing (Default: 1)
+RUN_INITIAL_SYNC          1|0 — run sync immediately after creation/update (Default: 0)
+DRY_RUN                   1|0 — print operations without applying (Default: 0)
+CONFIRM_COMMAND           1|0 — confirm each command in debug mode (Default: 0)
+
+Usage
+-----
+# stage configuration metadata
+sudo bash pbs-setup.sh install
+
+# apply retention/schedules + push sync jobs (idempotent)
+sudo bash pbs-setup.sh run
+
+# prompt/confirm each action, show verbose logs
+sudo bash pbs-setup.sh debug
+
+# update to canonical version
+sudo bash pbs-setup.sh self-update
+
+# remove Shell Expert state (does not alter PBS)
+sudo bash pbs-setup.sh uninstall
+
+Operational Notes
+-----------------
+- No datastore creation is attempted. If any are missing, the script fails (default) or warns (STRICT_DATASTORE_CHECK=0).
+- Push jobs use a loopback "self" remote; no network hop required.
+- To protect cloud costs, S3s retain far fewer snapshots than local.
+
+EOF
+    ;;
+  run|*) main "$@";;
+esac
+exit $?

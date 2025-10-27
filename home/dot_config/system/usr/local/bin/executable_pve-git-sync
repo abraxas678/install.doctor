@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pve-git-sync — GitOps-style config backup for Proxmox VE / Coolify
+# git-sync — GitOps-style config backup for Proxmox VE / Coolify
 # ==============================================================================
 # Environment Variables (export or set inline)
 #
@@ -11,7 +11,7 @@
 # │                         │ proxmox-configs.git                              │
 # ├─────────────────────────┼───────────────────────────────────────────────────┤
 # │ WORK_TREE               │ Local checkout directory.                         │
-# │                         │ Default: /usr/local/share/pve-git-sync           │
+# │                         │ Default: /usr/local/share/git-sync           │
 # ├─────────────────────────┼───────────────────────────────────────────────────┤
 # │ HEALTHCHECK_URL         │ Healthchecks base URL. Default:                   │
 # │                         │ https://healthchecks.megabyte.space/ping/        │
@@ -49,14 +49,14 @@
 #   • Prompts once for OPENAI_KEY (TTY only); token never logged
 #   • AI commits non-interactively: `echo | aicommits --force` or `aic --force`
 #   • systemd timer; logs → journald and /var/log/…
-#   • Healthchecks: GET /start → POST trimmed **/var/log/pve-git-sync.log**
+#   • Healthchecks: GET /start → POST trimmed **/var/log/git-sync.log**
 #   • Concurrency-safe (flock); offline-tolerant (local commits → later push)
 #
 # Usage
-#   pve-git-sync install       # install service+timer (prompts OPENAI_KEY)
-#   pve-git-sync run           # one-off sync now (default; no gh auth)
-#   pve-git-sync status        # view systemd/logs
-#   pve-git-sync uninstall     # remove service+timer
+#   git-sync install       # install service+timer (prompts OPENAI_KEY)
+#   git-sync run           # one-off sync now (default; no gh auth)
+#   git-sync status        # view systemd/logs
+#   git-sync uninstall     # remove service+timer
 #
 # ==============================================================================
 
@@ -72,15 +72,15 @@ elif [ -d /etc/pve ]; then
 fi
 DEFAULT_TIMER_INTERVAL="15m"
 
-CONF_FILE="/etc/pve-git-sync.conf"
-WORK_TREE_DEFAULT="/usr/local/share/pve-git-sync"
-LOG_FILE="/var/log/pve-git-sync.log"
-SERVICE_NAME="pve-git-sync.service"
-TIMER_NAME="pve-git-sync.timer"
+CONF_FILE="/etc/git-sync.conf"
+WORK_TREE_DEFAULT="/usr/local/share/git-sync"
+LOG_FILE="/var/log/git-sync.log"
+SERVICE_NAME="git-sync.service"
+TIMER_NAME="git-sync.timer"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
 TIMER_PATH="/etc/systemd/system/${TIMER_NAME}"
 SELF="${0}"
-LOCKFILE="/run/pve-git-sync.lock"
+LOCKFILE="/run/git-sync.lock"
 
 # ------------------------------ Logging --------------------------------------
 RUN_LOG=""
@@ -101,9 +101,9 @@ STEP()  { _log_emit ""; _log_emit "[$(LOG_TS)] ===== $* ====="; }
 
 init_log() {
   mkdir -p "$(dirname "$LOG_FILE")"
-  RUN_LOG="$(mktemp /run/pve-git-sync.XXXXXX.log)"
+  RUN_LOG="$(mktemp /run/git-sync.XXXXXX.log)"
   touch "$LOG_FILE"
-  INFO "pve-git-sync starting (pid=$$)"
+  INFO "git-sync starting (pid=$$)"
 }
 cleanup_runlog() { [[ -n "${RUN_LOG:-}" && -f "$RUN_LOG" ]] && rm -f "$RUN_LOG" || true; }
 
@@ -132,7 +132,7 @@ require_root() { [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Must be run as root"; }
 with_lock() {
   exec {lockfd}>"$LOCKFILE" || die "Cannot open lock $LOCKFILE"
   if ! flock -n "$lockfd"; then
-    WARN "Another pve-git-sync instance is running; exiting early (lock: $LOCKFILE)"
+    WARN "Another git-sync instance is running; exiting early (lock: $LOCKFILE)"
     exit 0
   fi
   DEBUG "Acquired lock $LOCKFILE (fd $lockfd)"
@@ -189,7 +189,7 @@ load_config() {
 save_config() {
   umask 077
   cat >"$CONF_FILE" <<EOF
-# pve-git-sync configuration
+# git-sync configuration
 REPO="${REPO}"
 WORK_TREE="${WORK_TREE}"
 HEALTHCHECK_URL="${HEALTHCHECK_URL}"
@@ -495,7 +495,7 @@ Thumbs.db
 EOF
     elif [ -d /etc/pve ]; then
       cat >"$WORK_TREE/.gitignore" <<'EOF'
-# ---- pve-git-sync default ignores (Proxmox-focused) -------------------------
+# ---- git-sync default ignores (Proxmox-focused) -------------------------
 /var/lib/vz/images/
 /var/lib/vz/snippets/
 /var/lib/vz/template/iso/
@@ -559,7 +559,7 @@ seed_readme_if_missing() {
   cat >"$WORK_TREE/README.md" <<EOF
 # Proxmox Config GitOps
 
-This repository stores text-based configuration snapshots from Proxmox VE hosts, produced by \`pve-git-sync\`.
+This repository stores text-based configuration snapshots from Proxmox VE hosts, produced by \`git-sync\`.
 
 ## Healthchecks
 Default used by the script: \`${DEFAULT_HEALTHCHECK_URL}\`
@@ -593,7 +593,7 @@ bootstrap_repo_run() {
   if [[ ! -d "$WORK_TREE/.git" ]]; then
     STEP "Cloning repository (no gh auth during run)"
     if ! run_cmd "git clone --depth=1 '$REPO' '$WORK_TREE'"; then
-      die "git clone failed (run mode). Ensure SSH access and run 'pve-git-sync install' first."
+      die "git clone failed (run mode). Ensure SSH access and run 'git-sync install' first."
     fi
   else
     STEP "Updating repository"
@@ -657,7 +657,7 @@ commit_with_ai_or_fallback() {
   fi
 
   local ts; ts="$(date +'%F %T %z')"
-  if run_cmd "git -C '$WORK_TREE' commit ${sign_flag} -m 'chore(pve-git-sync): sync $(hostname) @ ${ts}'"; then
+  if run_cmd "git -C '$WORK_TREE' commit ${sign_flag} -m 'chore(git-sync): sync $(hostname) @ ${ts}'"; then
     new_head="$(git -C '$WORK_TREE' rev-parse HEAD 2>/dev/null || echo 'none')"
     INFO "Fallback commit created: $old_head -> $new_head"
   else
@@ -710,7 +710,7 @@ perform_sync() {
     local branch; branch="$(detect_default_branch)"
     run_cmd "git -C '$WORK_TREE' push origin 'HEAD:${branch}'" && INFO "Pushed to ${branch}"
   else
-    WARN "Cannot reach remote or lack permissions; leaving commits local (run 'pve-git-sync install' to set up auth)"
+    WARN "Cannot reach remote or lack permissions; leaving commits local (run 'git-sync install' to set up auth)"
   fi
 }
 
@@ -739,14 +739,14 @@ EOF
 
   cat >"$TIMER_PATH" <<EOF
 [Unit]
-Description=Run pve-git-sync periodically
+Description=Run git-sync periodically
 
 [Timer]
 OnBootSec=5m
 OnUnitActiveSec=${SYNC_INTERVAL}
 AccuracySec=1m
 RandomizedDelaySec=2m
-Unit=pve-git-sync.service
+Unit=git-sync.service
 Persistent=true
 
 [Install]

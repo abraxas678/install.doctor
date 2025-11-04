@@ -1,67 +1,51 @@
 #!/bin/sh
+
 # PROVIDE: cloudflared
-# REQUIRE: LOGIN NETWORKING
-# BEFORE:  unbound dnsmasq
+# REQUIRE: NETWORKING SERVERS
 # KEYWORD: shutdown
 
 . /etc/rc.subr
 
 name="cloudflared"
-rcvar="${name}_enable"
+rcvar="cloudflared_enable"
 
-# --- Defaults (override via rc.conf.d/cloudflared) ---
+procname="/usr/local/bin/cloudflared"
+pidfile="/var/run/cloudflared.pid"
+logfile="/var/log/cloudflared.log"
+token_file="/usr/local/etc/cloudflared/token"
+
 : ${cloudflared_enable:="NO"}
-: ${cloudflared_user:="cloudflared"}
-: ${cloudflared_mode:="tunnel"}        # "tunnel" or "proxy-dns"
-: ${cloudflared_config:="/usr/local/etc/cloudflared/config.yml"}
-: ${cloudflared_token:=""}             # set for token-based tunnel
+# For token-based tunnels, "tunnel run" is the expected form.
+: ${cloudflared_mode:="tunnel run"}
+# Handy default; override in rc.conf if you want updates.
 : ${cloudflared_flags:="--no-autoupdate"}
-: ${cloudflared_logfile:="/var/log/${name}.log"}
-: ${cloudflared_pidfile:="/var/run/${name}.pid"}
-: ${cloudflared_bin:="/usr/local/bin/cloudflared"}
-
-pidfile="${cloudflared_pidfile}"
-procname="${cloudflared_bin}"
-command="/usr/sbin/daemon"
-# -f: run child in foreground (daemon supervises)
-# -r: restart if it crashes
-# -u: drop to user
-command_args="-f -r -u ${cloudflared_user} -p ${pidfile} -o ${cloudflared_logfile}"
-
-start_cmd="${name}_start"
-
-cloudflared_start()
-{
-    # Build args from mode + token/config
-    _args="${cloudflared_flags}"
-    case "${cloudflared_mode}" in
-        tunnel)
-            if [ -n "${cloudflared_token}" ]; then
-                # Token-based (no config required)
-                _args="tunnel ${_args} run --token ${cloudflared_token}"
-            else
-                # Config-based
-                required_files="${cloudflared_config}"
-                _args="tunnel ${_args} --config ${cloudflared_config} run"
-            fi
-            ;;
-        proxy-dns)
-            # Example: add --port 5353 or --address 127.0.0.1 in flags if you like
-            _args="proxy-dns ${_args}"
-            ;;
-        *)
-            echo "Unknown cloudflared_mode='${cloudflared_mode}' (use 'tunnel' or 'proxy-dns')" >&2
-            return 1
-            ;;
-    esac
-
-    install -d -o "${cloudflared_user}" -g "${cloudflared_user}" /usr/local/etc/cloudflared >/dev/null 2>&1 || true
-    touch "${cloudflared_logfile}" 2>/dev/null || true
-    chown "${cloudflared_user}:${cloudflared_user}" "${cloudflared_logfile}" 2>/dev/null || true
-
-    echo "Starting ${name}…"
-    ${command} ${command_args} -- ${procname} ${_args}
-}
 
 load_rc_config $name
+
+# Build cloudflared args (append token if present)
+cf_args="${cloudflared_mode} ${cloudflared_flags}"
+if [ -f "${token_file}" ]; then
+    cf_args="${cf_args} --token $(cat "${token_file}")"
+fi
+
+command="/usr/sbin/daemon"
+# -r = respawn if child exits
+command_args="-r -o ${logfile} -p ${pidfile} ${procname} ${cf_args}"
+
+start_precmd="${name}_prestart"
+cloudflared_prestart()
+{
+    mkdir -p /var/run
+    mkdir -p "$(dirname "${logfile}")"
+
+    case "${cloudflared_mode}" in
+        *"tunnel run"*)
+            if [ ! -f "${token_file}" ]; then
+                echo "${name}: missing ${token_file} (required for 'tunnel run')."
+                return 1
+            fi
+            ;;
+    esac
+}
+
 run_rc_command "$1"

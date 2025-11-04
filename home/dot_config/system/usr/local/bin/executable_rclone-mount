@@ -26,8 +26,27 @@ fi
 
 # @description Log messages with timestamps
 log() {
-  gum log -sl info "$(date '+%Y-%m-%d %H:%M:%S') - $1"
+  # log <LEVEL> <message...>
+  local level="$1"; shift || true
+  local msg="$*"
+  local ts
+  ts=$(date '+%Y-%m-%d %H:%M:%S')
+
+  # Ensure LOG_FOLDER is defined and exists
+  LOG_FOLDER=${LOG_FOLDER:-"$HOME/.local/var/log/rclone"}
+  mkdir -p "$LOG_FOLDER"
+
+  # Default lowercase mount name for log file
+  local name
+  name=${MOUNT_LOWERCASE:-mount}
+
+  echo "$ts [$level] $msg" | tee -a "$LOG_FOLDER/${name}.log"
 }
+
+# convenience wrappers
+log_info()  { log INFO "$@"; }
+log_warn()  { log WARN "$@"; }
+log_error() { log ERROR "$@"; }
 
 # @description Validate input arguments
 validateInputs() {
@@ -39,15 +58,15 @@ validateInputs() {
 
   # Sanitize inputs
   TYPE=$(echo "$1" | grep -E "^[a-zA-Z0-9_-]+$" || {
-    gum log -sl error "Invalid type: $1" >&2
+    echo "Invalid type: $1" >&2
     exit 1
   })
   USER=$(echo "$2" | grep -E "^[a-zA-Z0-9_]+$" || {
-    gum log -sl error "Invalid user: $2" >&2
+    echo "Invalid user: $2" >&2
     exit 1
   })
   MOUNT=$(echo "$3" | grep -E "^[a-zA-Z0-9_-]+$" || {
-    gum log -sl error "Invalid mount: $3" >&2
+    echo "Invalid mount: $3" >&2
     exit 1
   })
 }
@@ -80,13 +99,46 @@ setMountVariables() {
 
 # @description Ensure necessary folders and permissions
 ensureFolders() {
-  for FOLDER in "$CACHE_FOLDER" "$LOG_FOLDER" "$MOUNT_PATH"; do
+  for FOLDER in "$CACHE_FOLDER" "$LOG_FOLDER"; do
     if [[ ! -d "$FOLDER" ]]; then
       mkdir -p "$FOLDER"
-      chmod 755 "$FOLDER"
-      chown "$USER:rclone" "$FOLDER"
+      chmod 750 "$FOLDER"
     fi
   done
+
+  # Create mount path and set ownership/permissions based on type/mount
+  if [[ ! -d "$MOUNT_PATH" ]]; then
+    mkdir -p "$MOUNT_PATH"
+  fi
+
+  if [[ "$TYPE" == "user" ]]; then
+    # User mount: owned by user, writable without root
+    chown "$USER:$USER" "$MOUNT_PATH"
+    chmod 700 "$MOUNT_PATH"
+  else
+    case "$MOUNT" in
+      Private)
+        # Only root can view Private
+        chown root:root "$MOUNT_PATH"
+        chmod 700 "$MOUNT_PATH"
+        ;;
+      Public)
+        # Public is only viewable by the target user (mount performed by root)
+        chown "$USER:$USER" "$MOUNT_PATH"
+        chmod 700 "$MOUNT_PATH"
+        ;;
+      *)
+        # Default for other volumes: root-owned but group rclone if available
+        if getent group rclone >/dev/null 2>&1; then
+          chown root:rclone "$MOUNT_PATH"
+          chmod 750 "$MOUNT_PATH"
+        else
+          chown root:root "$MOUNT_PATH"
+          chmod 750 "$MOUNT_PATH"
+        fi
+        ;;
+    esac
+  fi
 }
 
 # @description Validate and secure rclone configuration
@@ -109,24 +161,42 @@ validateRcloneConfig() {
 
 # @description Handles conditional logic for setting file permissions and ownership
 setPermissions() {
+  # Default fallbacks
+  FILE_PERMS="0644"
+  DIR_PERMS="0755"
+  MOUNT_UID=0
+  MOUNT_GID=0
+
   if [ "$TYPE" = 'user' ]; then
+    # User mount: owned by user and writable without root access
     FILE_PERMS="0660"
-    DIR_PERMS="0770"
+    DIR_PERMS="0700"
     MOUNT_UID="$(id -u "$USER")"
-    MOUNT_GID="$(id -g rclone)"
+    MOUNT_GID="$(id -g "$USER")"
   elif [ "$TYPE" = 'volume' ]; then
     if [ "$MOUNT" = 'Private' ]; then
-      FILE_PERMS="0664"
-      DIR_PERMS="0775"
-      # Allow user access by using their UID but rclone group
-      MOUNT_UID="$(id -u "$USER")"
-      MOUNT_GID="$(id -g rclone)"
+      # Private: only root should view
+      FILE_PERMS="0600"
+      DIR_PERMS="0700"
+      MOUNT_UID=0
+      MOUNT_GID=0
     elif [ "$MOUNT" = 'Public' ]; then
-      FILE_PERMS="0664"
-      DIR_PERMS="0775"
-      # Allow user access by using their UID but rclone group
+      # Public: mounted by root but only viewable by the target user
+      FILE_PERMS="0600"
+      DIR_PERMS="0700"
       MOUNT_UID="$(id -u "$USER")"
-      MOUNT_GID="$(id -g rclone)"
+      MOUNT_GID="$(id -g "$USER")"
+    else
+      # Default volume behavior: root-owned with group rclone if present
+      FILE_PERMS="0644"
+      DIR_PERMS="0750"
+      if getent group rclone >/dev/null 2>&1; then
+        MOUNT_UID=0
+        MOUNT_GID=$(getent group rclone | cut -d: -f3)
+      else
+        MOUNT_UID=0
+        MOUNT_GID=0
+      fi
     fi
   fi
 }
@@ -135,8 +205,7 @@ setPermissions() {
 mountRclone() {
   unset AWS_CA_BUNDLE
   export PATH="$PATH:/usr/local/bin:/usr/bin"
-
-  log "Mounting RClone bucket: $MOUNT_REF to $MOUNT_PATH"
+  log_info "Mounting RClone bucket: $MOUNT_REF to $MOUNT_PATH"
   rclone --config "$RCLONE_CONF" \
     mount \
     --allow-other=true \
@@ -174,6 +243,9 @@ mountRclone() {
     --volname "${VOL_NAME:-$MOUNT_REF}" \
     "$MOUNT_REF":"$MOUNT_LOWERCASE" "$MOUNT_PATH"
 }
+
+  # Error trap for better logging
+  trap 'rc=$?; log_error "Script failed at line ${LINENO} with exit code ${rc}"; exit ${rc}' ERR
 
 # @description Main script execution
 main() {

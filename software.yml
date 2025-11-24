@@ -259,6 +259,15 @@ softwarePackages:
     _short: "aicommits is a tool for analyzing and visualizing AI-related commits on GitHub.                                                                                                                           "
     brew: aicommits
     npm: aicommits
+
+  aichat:
+    _bin: aichat
+    _desc: "AI Chat by sigoden — repository: https://github.com/sigoden/aichat."
+    _github: https://github.com/sigoden/aichat
+    _name: aichat
+    _short: "aichat — AI chat interface by sigoden"
+    cargo: aichat
+    _todo: "Add additional install methods (brew/npm/pip) and any binaries once upstream provides them."
   aider:
     _bin: aider
     _desc: "Aider is a GitHub repository created by Paul Gauthier. Unfortunately, without further context or access to the repository, I cannot provide specific details about its contents. To learn more about the  \nproject, you can visit the repository link provided and explore the code, documentation, and any other resources available there.                                                                         "
@@ -388,6 +397,15 @@ softwarePackages:
     brew: charmbracelet/tap/crush
     nix: github:numtide/nix-ai-tools#crush
     winget: charmbracelet.crush
+
+  mods:
+    _bin: mods
+    _desc: "Mods by Charmbracelet — https://github.com/charmbracelet/mods"
+    _github: https://github.com/charmbracelet/mods
+    _name: Mods
+    _short: "mods — UI components and helpers for Charm projects"
+    brew: charmbracelet/tap/mods
+    go: github.com/charmbracelet/mods@latest
   gemini-cli:
     _bin: gemini
     _github: https://github.com/google-gemini/gemini-cli
@@ -426,6 +444,15 @@ softwarePackages:
     flatpak: com.google.AndroidStudio
     snap: android-studio
     yay: android-studio
+  webhook:
+    _bin: webhook
+    _todo: TODO - add this to the stack
+    _desc: Turn CLIs into APIs
+    _github: https://github.com/adnanh/webhook
+    _name: Webhook
+    brew: webhook
+    go: github.com/adnanh/webhook@latest
+    snap: webhook
   angular-cli:
     _bin: ng
     _desc: "[Angular](https://angular.io) The web development framework for building the future"
@@ -4949,6 +4976,15 @@ softwarePackages:
     _short: "howdoi is a command-line tool that instantly provides answers to programming questions by searching through Stack Overflow.                                                                               "
     brew: howdoi
     pipx: howdoi
+  how2:
+    _bin: how2
+    _desc: "how2 is a command-line tool that shows examples of how to use commands by searching examples online. Repository: https://github.com/santinic/how2"
+    _github: https://github.com/santinic/how2
+    _name: how2
+    _short: "how2 — quick examples for command-line usage"
+    npm: how2
+    brew: how2
+    _todo: "Confirm Homebrew formula name; if not in core consider adding 'brew: santinic/tap/how2' or an install script."
   hss:
     _bin: hss
     _desc: "hss is a high-speed socks5 proxy server designed for shadowsocks. It is written in C and aims to provide a fast and efficient proxy solution. The project on GitHub provides details on how to build and  \nuse the proxy server. It supports multiple encryption methods and is optimized for performance. Users can configure it to work with shadowsocks clients for secure and fast internet browsing.            "

@@ -373,6 +373,112 @@ else
 fi
 # (Docs: Default bridged networking & VLAN-aware examples)  
 
+# ==============================================================================
+# Stage: bridge-transparency — ensure bridge nets are transparent to iptables
+#
+# Purpose/summary:
+# - Load the `br_netfilter` kernel module so the kernel exposes bridge-related
+#   sysctls. These sysctls control whether bridged packets are passed through
+#   the netfilter/iptables/ nftables hooks. By default some distributions enable
+#   filtering which causes bridged (L2) traffic to be inspected by the host's
+#   iptables rules. For many VM/container networking setups (Proxmox bridges)
+#   you usually want the bridge to be "transparent": the bridge forwards L2
+#   frames without the host altering or dropping them via iptables. That is
+#   achieved by setting the following sysctls to 0 (disable netfilter hooks):
+#     - net.bridge.bridge-nf-call-iptables
+#     - net.bridge.bridge-nf-call-ip6tables
+#     - net.bridge.bridge-nf-call-arptables
+#
+# - This stage is idempotent: it records completion under
+#   `~/.cache/pve-postinstall/bridge-transparency.done` and will only make
+#   changes once. It also checks current kernel/module state and existing
+#   on-disk config before touching files.
+#
+# What is a "transparent bridge"?
+# - A transparent bridge behaves like a simple L2 switch/bridge: it forwards
+#   Ethernet frames between ports without the host's IP packet filtering
+#   (iptables/nftables) inspecting or altering bridged packets. This is
+#   important when the host should not interfere with VM/container traffic or
+#   when upstream network devices are responsible for firewalling.
+#
+if ! did bridge-transparency; then
+  if yesno "Configure bridge transparency (disable bridge netfilter hooks)" y; then
+    # Load module if not already loaded (so the sysctls exist)
+    if ! grep -q '^br_netfilter\b' /proc/modules 2>/dev/null; then
+      say "Loading br_netfilter kernel module..."
+      modprobe br_netfilter || warn "modprobe br_netfilter failed (continuing)"
+    else
+      ok "br_netfilter module already loaded"
+    fi
+
+    # Desired sysctl values (0 = do NOT pass bridged packets through netfilter)
+    declare -A want=(
+      [net.bridge.bridge-nf-call-iptables]=0
+      [net.bridge.bridge-nf-call-ip6tables]=0
+      [net.bridge.bridge-nf-call-arptables]=0
+    )
+
+    changed=0
+    for k in "${!want[@]}"; do
+      cur=$(sysctl -n "$k" 2>/dev/null || echo "")
+      if [[ "$cur" != "${want[$k]}" ]]; then
+        sysctl -w "$k=${want[$k]}" >/dev/null 2>&1 || warn "sysctl write $k failed"
+        changed=1
+      fi
+    done
+
+    # Persist across reboots: ensure module is loaded and sysctls are present
+    if ! grep -qxF 'br_netfilter' /etc/modules-load.d/br_netfilter.conf 2>/dev/null; then
+      say "Persisting br_netfilter load to /etc/modules-load.d/br_netfilter.conf"
+      echo br_netfilter >/etc/modules-load.d/br_netfilter.conf
+    else
+      ok "/etc/modules-load.d/br_netfilter.conf already contains br_netfilter"
+    fi
+
+    # Write sysctl file atomically if needed
+    SYSCTL_CONF=/etc/sysctl.d/99-bridge-transparency.conf
+    need_write=0
+    if [[ -f "$SYSCTL_CONF" ]]; then
+      for k in "${!want[@]}"; do
+        if ! grep -qE "^\s*${k}\s*=\s*${want[$k]}\s*$" "$SYSCTL_CONF"; then
+          need_write=1; break
+        fi
+      done
+    else
+      need_write=1
+    fi
+
+    if (( need_write )); then
+      say "Writing $SYSCTL_CONF"
+      cat >"$SYSCTL_CONF" <<'EOF'
+net.bridge.bridge-nf-call-iptables = 0
+net.bridge.bridge-nf-call-ip6tables = 0
+net.bridge.bridge-nf-call-arptables = 0
+EOF
+    else
+      ok "$SYSCTL_CONF already contains desired settings"
+    fi
+
+    # Reload only our config file (safe) to ensure runtime matches disk
+    sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || warn "sysctl -p $SYSCTL_CONF failed"
+
+    # Report current values
+    say "Bridge netfilter settings:"
+    sysctl net.bridge.bridge-nf-call-iptables net.bridge.bridge-nf-call-ip6tables net.bridge.bridge-nf-call-arptables || true
+
+    if (( changed )); then
+      ok "Bridge transparency applied (runtime changed)."
+    else
+      ok "Bridge transparency already set at runtime."
+    fi
+  else
+    warn "Skipped bridge transparency configuration."
+  fi
+  mark bridge-transparency
+else
+  ok "Bridge-transparency stage already completed."
+fi
+
 echo
 say "=== Post-install complete ==="
 pveversion || true

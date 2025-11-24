@@ -1,0 +1,216 @@
+#!/bin/sh
+#
+# setup-cloudflared-opnsense.sh
+# One-shot installer to set up Cloudflare Tunnel (cloudflared)
+# as a managed rc.d service on OPNsense / FreeBSD.
+#
+# Usage:
+#   sh setup-cloudflared-opnsense.sh "<CLOUDFLARE_TUNNEL_TOKEN>"
+#   or run without args and you’ll be prompted securely.
+
+set -eu
+
+CF_BIN="/usr/local/bin/cloudflared"
+RC_SCRIPT="/usr/local/etc/rc.d/cloudflared"
+TOKEN_DIR="/usr/local/etc/cloudflared"
+TOKEN_FILE="${TOKEN_DIR}/token"
+RC_CONF="/etc/rc.conf"
+
+###############################################################################
+# Helpers
+###############################################################################
+
+need_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "This script must be run as root." >&2
+    exit 1
+  fi
+}
+
+install_cloudflared() {
+  if command -v "${CF_BIN}" >/dev/null 2>&1; then
+    echo "cloudflared is already installed at ${CF_BIN}"
+    return
+  fi
+
+  echo "cloudflared not found, attempting installation..."
+
+  if command -v pkg >/dev/null 2>&1; then
+    echo "Trying: pkg install -y cloudflared"
+    if pkg install -y cloudflared; then
+      echo "cloudflared installed via pkg."
+      return
+    else
+      echo "pkg install failed; trying ports (opnsense-code)..."
+    fi
+  else
+    echo "pkg not available; will try ports (opnsense-code) if present..."
+  fi
+
+  if command -v opnsense-code >/dev/null 2>&1; then
+    echo "Fetching ports tree with opnsense-code..."
+    opnsense-code ports tools
+    echo "Building net/cloudflared from ports (this may take a while)..."
+    cd /usr/ports/net/cloudflared
+    make install clean BATCH=yes
+    echo "cloudflared installed from ports."
+  else
+    echo "ERROR: opnsense-code not found and pkg install failed."
+    echo "Please install cloudflared manually, then re-run this script."
+    exit 1
+  fi
+
+  if ! command -v "${CF_BIN}" >/dev/null 2>&1; then
+    echo "ERROR: cloudflared still not found at ${CF_BIN} after installation." >&2
+    exit 1
+  fi
+}
+
+create_rc_script() {
+  echo "Creating rc.d script at ${RC_SCRIPT} ..."
+
+  cat > "${RC_SCRIPT}" << 'EOF'
+#!/bin/sh
+#
+# PROVIDE: cloudflared
+# REQUIRE: NETWORKING SERVERS
+# KEYWORD: shutdown
+#
+# Cloudflare Tunnel rc.d wrapper for OPNsense / FreeBSD.
+
+. /etc/rc.subr
+
+name="cloudflared"
+rcvar="cloudflared_enable"
+logfile="/var/log/${name}.log"
+pidfile="/var/run/${name}.pid"
+procname="/usr/local/bin/cloudflared"
+
+load_rc_config $name
+
+: ${cloudflared_enable:="NO"}
+: ${cloudflared_mode:="tunnel"}
+
+# Build arguments for cloudflared
+cf_args="${cloudflared_mode}"
+
+# Read token from file if present
+if [ -f /usr/local/etc/cloudflared/token ]; then
+  token=$(cat /usr/local/etc/cloudflared/token)
+  cf_args="${cf_args} --token ${token}"
+fi
+
+command="/usr/sbin/daemon"
+command_args="-o ${logfile} -p ${pidfile} -f ${procname} ${cf_args}"
+
+run_rc_command "$1"
+EOF
+
+  chmod 755 "${RC_SCRIPT}"
+  echo "rc.d script created and made executable."
+}
+
+store_token() {
+  TOKEN="${1:-}"
+
+  if [ -z "${TOKEN}" ]; then
+    echo "No token provided as argument."
+    printf "Enter your Cloudflare tunnel token: "
+    # Silent input
+    stty -echo
+    read -r TOKEN
+    stty echo
+    printf "\n"
+  fi
+
+  if [ -z "${TOKEN}" ]; then
+    echo "ERROR: Token cannot be empty." >&2
+    exit 1
+  fi
+
+  echo "Storing token securely in ${TOKEN_FILE} ..."
+  mkdir -p "${TOKEN_DIR}"
+  # Overwrite existing token file safely
+  printf "%s\n" "${TOKEN}" > "${TOKEN_FILE}"
+  chmod 600 "${TOKEN_FILE}"
+  echo "Token stored with permissions 600."
+}
+
+update_rc_conf_kv() {
+  key="$1"
+  value="$2"
+
+  # Create /etc/rc.conf if missing
+  if [ ! -f "${RC_CONF}" ]; then
+    touch "${RC_CONF}"
+  fi
+
+  if grep -q "^${key}=" "${RC_CONF}" 2>/dev/null; then
+    # FreeBSD sed in-place syntax: -i ''
+    sed -i '' "s|^${key}=.*|${key}=\"${value}\"|" "${RC_CONF}"
+  else
+    echo "${key}=\"${value}\"" >> "${RC_CONF}"
+  fi
+}
+
+configure_rc_conf() {
+  echo "Configuring ${RC_CONF} ..."
+
+  # Enable the service
+  update_rc_conf_kv "cloudflared_enable" "YES"
+  # Recommended mode from the article: tunnel + no auto-update + PQ flag
+  update_rc_conf_kv "cloudflared_mode" "tunnel --no-autoupdate run --post-quantum"
+
+  echo "rc.conf updated:"
+  grep "^cloudflared_" "${RC_CONF}" || true
+}
+
+start_service() {
+  echo "Starting cloudflared service..."
+  if service cloudflared start; then
+    echo "cloudflared service started successfully."
+  else
+    echo "ERROR: Failed to start cloudflared service." >&2
+    exit 1
+  fi
+
+  echo
+  echo "Service status:"
+  service cloudflared status || true
+
+  echo
+  echo "Logs (tail):"
+  echo "  tail -f /var/log/cloudflared.log"
+}
+
+###############################################################################
+# Main
+###############################################################################
+
+main() {
+  need_root
+  install_cloudflared
+  create_rc_script
+  store_token "${1:-}"
+  configure_rc_conf
+  start_service
+
+  cat << INFO
+
+Done!
+
+cloudflared has been:
+  - Installed (via pkg or ports)
+  - Registered as an rc.d service: ${RC_SCRIPT}
+  - Configured to read its token from: ${TOKEN_FILE}
+  - Enabled in ${RC_CONF} with:
+      cloudflared_enable="YES"
+      cloudflared_mode="tunnel --no-autoupdate run --post-quantum"
+  - Started as a background daemon via /usr/sbin/daemon
+
+You now have a persistent Cloudflare Tunnel service on your OPNsense box.
+
+INFO
+}
+
+main "${@}"

@@ -444,6 +444,11 @@ softwarePackages:
     flatpak: com.google.AndroidStudio
     snap: android-studio
     yay: android-studio
+  httm:
+    _bin: httm
+    _github: https://github.com/kimono-koans/httm
+    _name: httm
+    cargo: httm
   webhook:
     _bin: webhook
     _todo: TODO - add this to the stack

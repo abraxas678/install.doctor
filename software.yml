@@ -449,6 +449,16 @@ softwarePackages:
     _github: https://github.com/kimono-koans/httm
     _name: httm
     cargo: httm
+  nsjail:
+    _todo: add this, at time of adding there was no easily installable source but 3.2k stars and seems active
+    _name: nsjail
+    _github: https://github.com/google/nsjail
+  codex:
+    _bin: codex
+    _github: https://github.com/openai/codex
+    _name: Codex
+    npm: '@openai/codex'
+    cask: codex
   webhook:
     _bin: webhook
     _todo: TODO - add this to the stack

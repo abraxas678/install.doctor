@@ -110,5 +110,21 @@
   },
   "[gotmpl]": {
     "editor.defaultFormatter": "trunk.io"
+  },
+  "chat.tools.autoApprove": true,
+  "chat.agent.maxRequests": 300,
+  "chat.tools.global.autoApprove": true,
+  "chat.tools.terminal.enableAutoApprove": true,
+  "chat.tools.terminal.autoApprove": {
+    "rm": false,
+    "rmdir": false,
+    "del": false,
+    "kill": false,
+    "curl": false,
+    "wget": false,
+    "eval": false,
+    "chmod": false,
+    "chown": false,
+    "/^Remove-Item\\b/i": false
   }
 }

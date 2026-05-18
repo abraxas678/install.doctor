@@ -98,12 +98,26 @@ ensureFullDiskAccess() {
   fi
 }
 
-# @description Install the mobileconfig files from `~/.config/macos/mobileconfig`
+# @description Install the mobileconfig files from `~/.config/macos/mobileconfig`.
+#     Starting with macOS Ventura, the `profiles` CLI no longer supports
+#     installing configuration profiles ("profiles tool no longer supports
+#     installs. Use System Settings Profiles to add configuration profiles.")
+#     so we detect that situation up front and skip rather than emitting
+#     errors for every .mobileconfig file in the directory.
 importSettingsMobileConfig() {
   if [ -d /Applications ] && [ -d /System ]; then
+    if ! command -v profiles > /dev/null; then
+      gum log -sl info 'profiles command not available; skipping mobileconfig install'
+      return 0
+    fi
+    if profiles help 2>&1 | grep -q 'no longer supports installs'; then
+      gum log -sl info 'The profiles CLI no longer supports installing configuration profiles on this macOS version; skipping. Install them manually from System Settings > Privacy & Security > Profiles.'
+      return 0
+    fi
     for FILE in "${XDG_DATA_HOME:-$HOME/.local/share}/chezmoi/home/dot_config/macos/mobileconfig/"*.mobileconfig; do
+      [ -f "$FILE" ] || continue
       gum log -sl info "Installing $FILE"
-      sudo profiles install -type configuration -path "$FILE"
+      sudo profiles install -type configuration -path "$FILE" || gum log -sl warn "Failed to install $FILE; continuing"
     done
   fi
 }

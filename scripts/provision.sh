@@ -171,6 +171,12 @@ logg() {
 setEnvironmentVariables() {
   export DEBIAN_FRONTEND=noninteractive
   export HOMEBREW_NO_ENV_HINTS=true
+  ### Force serial Homebrew downloads. The parallel downloader in newer
+  ### Homebrew releases races with itself on large bottles (go, python,
+  ### ruby, rust, volta, java@beta, macfuse, ...) and fails every retry
+  ### with "process has already locked ...<bottle>.incomplete" errors.
+  export HOMEBREW_DOWNLOAD_CONCURRENCY=1
+  export HOMEBREW_NO_AUTO_UPDATE="${HOMEBREW_NO_AUTO_UPDATE:-1}"
   if [ -z "$START_REPO" ] && [ -z "$REPO" ]; then
     export START_REPO="https://github.com/megabyte-labs/install.doctor.git"
   else
@@ -764,15 +770,22 @@ ensureHomebrewDeps() {
 # @description Ensure the `${XDG_DATA_HOME:-$HOME/.local/share}/chezmoi` directory is cloned and up-to-date using the previously
 #     set `START_REPO` as the source repository.
 cloneChezmoiSourceRepo() {
-  ### Accept licenses (only necessary if other steps fail)
+  ### Accept Xcode licenses if full Xcode (not just Command Line Tools) is installed.
+  ### When only CLT is present, xcodebuild exists as a stub but fails with
+  ### "tool 'xcodebuild' requires Xcode" because the active developer dir
+  ### points at /Library/Developer/CommandLineTools.
   if [ -d /Applications ] && [ -d /System ]; then
-    if command -v xcodebuild > /dev/null; then
-      logg info 'Running xcodebuild -license accept'
-      sudo xcodebuild -license accept
-      logg info 'Running sudo xcodebuild -runFirstLaunch'
-      sudo xcodebuild -runFirstLaunch
+    if command -v xcode-select > /dev/null && xcode-select -p 2>/dev/null | grep -q "Xcode.app"; then
+      if command -v xcodebuild > /dev/null; then
+        logg info 'Running xcodebuild -license accept'
+        sudo xcodebuild -license accept
+        logg info 'Running sudo xcodebuild -runFirstLaunch'
+        sudo xcodebuild -runFirstLaunch
+      else
+        logg warn 'xcodebuild is not available'
+      fi
     else
-      logg warn 'xcodebuild is not available'
+      logg info 'Full Xcode is not installed (only Command Line Tools); skipping xcodebuild license/setup steps'
     fi
   fi
 

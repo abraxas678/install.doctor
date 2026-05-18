@@ -674,24 +674,6 @@ installShellGPT() {
   fi
 }
 
-installAnsible() {
-  if command -v pipx > /dev/null; then
-    if [ ! -f "${XDG_CACHE_HOME:-$HOME/.cache}/install.doctor/ansible-installed" ]; then
-      gum log -sl info 'Running pipx install ansible' && pipx install ansible
-      if [ -d /Applications ] && [ -d /System ]; then
-        gum log -sl info 'Injecting ansible pipx with ansible PyObjC PyObjC-core because system is macOS' && pipx inject ansible PyObjC PyObjC-core
-      fi
-      gum log -sl info 'Running pipx inject ansible docker lxml netaddr pexpect python-vagrant pywinrm requests-credssp watchdog' && pipx inject ansible docker lxml netaddr pexpect python-vagrant pywinrm requests-credssp watchdog
-      mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/install.doctor"
-      touch "${XDG_CACHE_HOME:-$HOME/.cache}/install.doctor/ansible-installed"
-    else
-      gum log -sl info 'Ansible installation routine appears to have already been run'
-    fi
-  else
-    gum log -sl warn 'pipx is unavailable to use for installing Ansible'
-  fi
-}
-
 installBrewPackages() {
   ensureNodeInstalled
   ensureDeltaInstalled
@@ -706,10 +688,8 @@ installBrewPackages() {
   ensureBrewPackageInstalled "ruby"
   ensureBrewPackageInstalled "rustup"
   ensureBrewPackageInstalled "zx"
-  ensureBrewPackageInstalled "whalebrew"
   wait
   gum log -sl info 'Finished installing auxilary Homebrew packages'
-  gum log -sl info 'Ensuring Ansible is installed (with plugins)' && installAnsible
 }
 
 ensureMacportsInstalled() {
@@ -745,18 +725,6 @@ installYay() {
     sudo git clone https://aur.archlinux.org/yay.git /usr/local/src/yay
     cd /usr/local/src/yay
     sudo makepkg -si --noconfirm
-  fi
-}
-
-installNix() {
-  if ! command -v nix-shell > /dev/null; then
-    if [ -d /Applications ] && [ -d /System ]; then
-      ### macOS
-      gum log -sl info 'Installing nix for macOS' && curl -L https://nixos.org/nix/install | sh -s -- --daemon --yes
-    else
-      ### Linux
-      gum log -sl info 'Installing nix' && curl -L https://nixos.org/nix/install | sh -s -- --daemon --yes
-    fi
   fi
 }
 
@@ -796,14 +764,6 @@ zapInstall() {
       gum log -sl info 'Making /usr/local/bin/zap executable' && sudo chmod +x /usr/local/bin/zap
     fi
   fi
-}
-
-# @description Download and run the NixOS installation script.
-# @exitcode 0 If installation succeeded.
-# @exitcode 1 If installation failed.
-installNixOS() {
-    curl -L https://nixos.org/nix/install | sh -s -- --daemon
-    gum log -sl info "NixOS installation script executed."
 }
 
 addFlathub() {
@@ -889,7 +849,6 @@ if [ -n "$DEBUG" ] || [ -n "$DEBUG_MODE" ]; then
   installShellGPT
   setupLinuxHomebrewFonts
   rustUpFix
-  installNixOS
 else
   installBrewPackages
   installXcode &
@@ -903,7 +862,6 @@ else
   increaseMapCount &
   installDocker &
   installJumpCloud &
-  installNixOS &
   installShellGPT &
   installSystemPips &
   installYay &

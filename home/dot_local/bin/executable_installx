@@ -323,9 +323,6 @@ async function installPackages(pkgInstructions) {
       log(`Install orders for ${key}: ${combined[key].flatMap(i => i.installList).join(' ')}`)
     }
     switch (key) {
-      case 'ansible':
-        promises.push(forEachSeries(combined[key].flatMap(x => x.installList.flatMap(i => $`${key} 127.0.0.1 -v${process.env.DEBUG && 'vv'} -e '{ ansible_connection: "local", ansible_become_user: "root", ansible_user: "${process.env.USER}", ansible_family: "${osId.charAt(0).toUpperCase() + osId.slice(1)}", install_homebrew: False }' -m include_role -a name=${i}`))))
-        break
       case 'apk':
         const apkPackages = combined[key]?.flatMap(x => x.installList || []) || []
         if (apkPackages.length > 0) {
@@ -443,8 +440,6 @@ async function installPackages(pkgInstructions) {
         break
       case 'script':
         promises.push(...combined[key].flatMap(x => x.installList.flatMap(i => runScript(x.listKey, i))))
-        break
-      case 'whalebrew': // TODO
         break
       case 'xbps':
         promises.push($`sudo xbps-install -S ${combined[key].flatMap(x => x.installList).join(' ')}`)

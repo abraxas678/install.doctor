@@ -23,20 +23,18 @@ if [ -d /Applications ] && [ -d /System ]; then
 
   ### Check for presence of Homebrew
   if command -v brew > /dev/null; then
-    ### Disable Homebrew's parallel downloader. Newer Homebrew releases ship a
-    ### concurrent downloader that races with itself on large bottles (go,
-    ### python, ruby, rust, volta, java@beta, macfuse, ...) producing
-    ### "process has already locked ...<bottle>.incomplete" errors that fail
-    ### every retry. Forcing concurrency to 1 makes downloads serial and
-    ### avoids the lock conflicts.
+    ### Force serial Homebrew downloads. Newer Homebrew releases ship a parallel
+    ### downloader that races with itself on large bottles (go, python, ruby,
+    ### rust, volta, java@beta, macfuse, ...) producing
+    ### "process has already locked ...<bottle>.incomplete" errors that recur
+    ### on every retry. We also bypass `brew bundle` entirely below because it
+    ### still parallelises internally even with this env var set; instead we
+    ### install each formula / cask one at a time.
     export HOMEBREW_DOWNLOAD_CONCURRENCY=1
-    export HOMEBREW_NO_INSTALL_FROM_API="${HOMEBREW_NO_INSTALL_FROM_API:-}"
     export HOMEBREW_NO_AUTO_UPDATE="${HOMEBREW_NO_AUTO_UPDATE:-1}"
 
-    ### Aggressive cleanup of the Homebrew downloads cache. We remove every
-    ### `.incomplete*` artifact (including the bare-name lock files that
-    ### `flock` leaves behind) and any zero-byte bottles that previous failed
-    ### runs may have left in place.
+    ### Aggressive cleanup of the Homebrew downloads cache to clear any locks
+    ### left behind by a previous interrupted run.
     cleanupBrewDownloads() {
       BREW_DOWNLOADS_DIR="$(brew --cache 2>/dev/null)/downloads"
       if [ -d "$BREW_DOWNLOADS_DIR" ]; then
@@ -48,56 +46,60 @@ if [ -d /Applications ] && [ -d /System ]; then
     gum log -sl info "Cleaning up any stale download locks in $(brew --cache 2>/dev/null)/downloads"
     cleanupBrewDownloads
 
-    ### Install base dependencies
-    logg 'Installing base dependencies for macOS using brew bundle'
-    gum log -sl info 'Dependencies: age jq node glow go go-task/tap/go-task gnupg gum m-cli progress volta yq m-cli yq zx'
-    gum log -sl info 'GNU compatibility dependencies: coreutils findutils'
-
-    ### Capture the rendered Brewfile once so retry attempts use identical input
-    BREWFILE_CONTENTS=$(cat <<EOF
-{{ includeTemplate "darwin/Brewfile" . -}}
-EOF
-)
-
-    ### Retry brew bundle a few times with serial downloads. Even with
-    ### concurrency disabled, transient network errors can fail a fetch;
-    ### a clean retry usually picks up where the prior attempt left off.
-    BREW_BUNDLE_ATTEMPTS=0
-    BREW_BUNDLE_MAX_ATTEMPTS=3
-    BREW_BUNDLE_OK=""
-    while [ "$BREW_BUNDLE_ATTEMPTS" -lt "$BREW_BUNDLE_MAX_ATTEMPTS" ]; do
-      BREW_BUNDLE_ATTEMPTS=$((BREW_BUNDLE_ATTEMPTS + 1))
-      if HOMEBREW_DOWNLOAD_CONCURRENCY=1 printf '%s\n' "$BREWFILE_CONTENTS" | HOMEBREW_DOWNLOAD_CONCURRENCY=1 brew bundle --verbose --file=/dev/stdin; then
-        BREW_BUNDLE_OK=1
-        break
-      fi
-      gum log -sl warn "brew bundle failed (attempt $BREW_BUNDLE_ATTEMPTS/$BREW_BUNDLE_MAX_ATTEMPTS)"
-      if [ "$BREW_BUNDLE_ATTEMPTS" -lt "$BREW_BUNDLE_MAX_ATTEMPTS" ]; then
-        gum log -sl info "Clearing download locks and retrying"
-        cleanupBrewDownloads
+    ### Ensure required taps are present
+    logg 'Ensuring required Homebrew taps are present'
+    for TAP in homebrew/bundle homebrew/autoupdate homebrew/services homebrew/command-not-found go-task/tap; do
+      if ! brew tap | grep -qx "$TAP"; then
+        gum log -sl info "Tapping $TAP"
+        HOMEBREW_DOWNLOAD_CONCURRENCY=1 brew tap "$TAP" || gum log -sl warn "Failed to tap $TAP; continuing"
       fi
     done
-    if [ -z "$BREW_BUNDLE_OK" ]; then
-      gum log -sl warn "brew bundle did not complete cleanly after $BREW_BUNDLE_MAX_ATTEMPTS attempts. Falling back to per-package brew install."
-      ### Fallback: install each package individually with concurrency disabled.
-      ### This bypasses brew bundle entirely so we don't get blocked by a
-      ### single package's transient failure.
-      for FORMULA in age bash coreutils expect ffmpeg findutils fzf gawk git-delta glow gnupg go gsed gum htmlq jq m-cli m4 mas media-info moreutils node openssh pinentry-mac pipx pkgconf progress python@3.12 python@3.11 rsync ruby rust go-task/tap/go-task volta yarn yq zx; do
-        if brew list --formula "$FORMULA" > /dev/null 2>&1; then
-          continue
-        fi
-        gum log -sl info "Installing $FORMULA via brew (fallback)"
+
+    ### Install base formulae one at a time. Sequential `brew install` calls
+    ### avoid the parallel-downloader lock races that block `brew bundle`.
+    logg 'Installing base Homebrew formulae sequentially'
+    INSTALL_FAILED=""
+    for FORMULA in coreutils findutils m-cli age bash expect ffmpeg fzf gawk git-delta glow gnupg go gsed gum htmlq jq mas media-info moreutils m4 node openssh pinentry-mac pipx pkgconf progress python@3.12 python@3.11 rsync ruby rust go-task/tap/go-task volta yarn yq zx; do
+      if brew list --formula "$FORMULA" > /dev/null 2>&1; then
+        gum log -sl info "$FORMULA already installed"
+        continue
+      fi
+      gum log -sl info "Installing formula: $FORMULA"
+      cleanupBrewDownloads
+      if ! HOMEBREW_DOWNLOAD_CONCURRENCY=1 brew install --quiet "$FORMULA"; then
+        gum log -sl warn "Failed to install $FORMULA via brew; continuing"
+        INSTALL_FAILED="${INSTALL_FAILED} $FORMULA"
+      fi
+    done
+
+    ### Install casks one at a time as well.
+    logg 'Installing base Homebrew casks sequentially'
+    for CASK in docker-desktop macfuse; do
+      if brew list --cask "$CASK" > /dev/null 2>&1; then
+        gum log -sl info "Cask $CASK already installed"
+        continue
+      fi
+      gum log -sl info "Installing cask: $CASK"
+      cleanupBrewDownloads
+      if ! HOMEBREW_DOWNLOAD_CONCURRENCY=1 brew install --cask --quiet --no-quarantine "$CASK"; then
+        gum log -sl warn "Failed to install cask $CASK via brew; continuing"
+        INSTALL_FAILED="${INSTALL_FAILED} $CASK"
+      fi
+    done
+
+    ### Install java@beta only if no Java runtime is present already.
+    if ! /usr/libexec/java_home --failfast > /dev/null 2>&1; then
+      if ! brew list --cask java@beta > /dev/null 2>&1; then
+        gum log -sl info 'No Java runtime detected; installing cask java@beta'
         cleanupBrewDownloads
-        HOMEBREW_DOWNLOAD_CONCURRENCY=1 brew install --quiet "$FORMULA" || gum log -sl warn "Failed to install $FORMULA via brew"
-      done
-      for CASK in docker-desktop java@beta macfuse; do
-        if brew list --cask "$CASK" > /dev/null 2>&1; then
-          continue
-        fi
-        gum log -sl info "Installing cask $CASK via brew (fallback)"
-        cleanupBrewDownloads
-        HOMEBREW_DOWNLOAD_CONCURRENCY=1 brew install --cask --quiet --no-quarantine "$CASK" || gum log -sl warn "Failed to install cask $CASK via brew"
-      done
+        HOMEBREW_DOWNLOAD_CONCURRENCY=1 brew install --cask --quiet --no-quarantine java@beta || gum log -sl warn 'Failed to install cask java@beta; continuing'
+      fi
+    else
+      gum log -sl info 'A Java runtime is already installed; skipping cask java@beta'
+    fi
+
+    if [ -n "$INSTALL_FAILED" ]; then
+      gum log -sl warn "Some packages failed to install:$INSTALL_FAILED"
     fi
 
     ### Ensure Python version is 3.11 or higher

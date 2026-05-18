@@ -71,7 +71,6 @@ if [ -d /home/linuxbrew/.linuxbrew/bin ]; then
   export PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin${PATH+:$PATH}"
   export MANPATH="/home/linuxbrew/.linuxbrew/share/man${MANPATH+:$MANPATH}:"
   export INFOPATH="/home/linuxbrew/.linuxbrew/share/info:${INFOPATH:-}"
-  export WHALEBREW_INSTALL_PATH="/home/linuxbrew/.linuxbrew/whalebrew"
 elif [ -d "$HOME/.linuxbrew/bin" ]; then
   export HOMEBREW_PREFIX="$HOME/.linuxbrew"
   export HOMEBREW_CELLAR="$HOME/.linuxbrew/Cellar"
@@ -79,7 +78,6 @@ elif [ -d "$HOME/.linuxbrew/bin" ]; then
   export PATH="$HOME/.linuxbrew/bin:$HOME/.linuxbrew/sbin${PATH+:$PATH}"
   export MANPATH="$HOME/.linuxbrew/share/man${MANPATH+:$MANPATH}:"
   export INFOPATH="$HOME/.linuxbrew/share/info:${INFOPATH:-}"
-  export WHALEBREW_INSTALL_PATH="$HOME/.linuxbrew/whalebrew"
   eval "$("$HOME/.linuxbrew/bin/brew" shellenv)"
 elif [ -f /opt/homebrew/bin/brew ]; then
   eval $(/opt/homebrew/bin/brew shellenv)
@@ -91,7 +89,6 @@ fi
 export ANDROID_AVD_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/android/avd"
 if [ -d /Applications ] && [ -d /System ]; then
   ### macOS
-  export WHALEBREW_INSTALL_PATH="/usr/local/bin"
   export ANDROID_SDK_HOME="$HOME/Library/Android/sdk"
   export ANDROID_SDK_ROOT="$HOME/Library/Android/sdk"
   export ANDROID_HOME="$HOME/Library/Android/sdk"
@@ -539,9 +536,6 @@ export WEGORC="${XDG_CONFIG_HOME:-$HOME/.config}/wego/wegorc"
 
 ### wget
 export WGETRC="${XDG_CONFIG_HOME:-$HOME/.config}/wget/wgetrc"
-
-### Whalebrew
-export WHALEBREW_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/whalebrew"
 
 ### .zsh_sessions
 # Source: https://apple.stackexchange.com/questions/427561/macos-zsh-sessions-zsh-history-and-setopt-append-history

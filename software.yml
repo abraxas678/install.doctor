@@ -2,7 +2,6 @@ installerPreference:
   apt:
   - flatpak
   - snap
-  - whalebrew
   - apt
   - brew
   - go
@@ -13,10 +12,8 @@ installerPreference:
   - gem
   - appimage
   - script
-  - ansible
   - binary
   darwin:
-  - whalebrew
   - cask
   - brew
   - go
@@ -27,12 +24,10 @@ installerPreference:
   - gem
   - pkg-darwin
   - script
-  - ansible
   - binary
   dnf:
   - flatpak
   - snap
-  - whalebrew
   - dnf
   - brew
   - go
@@ -43,7 +38,6 @@ installerPreference:
   - gem
   - appimage
   - script
-  - ansible
   - binary
   freebsd:
   - pkg
@@ -55,7 +49,6 @@ installerPreference:
   pacman:
   - flatpak
   - snap
-  - whalebrew
   - pacman
   - brew
   - yay
@@ -67,12 +60,10 @@ installerPreference:
   - gem
   - appimage
   - script
-  - ansible
   - binary
   ubuntu:
   - snap
   - flatpak
-  - whalebrew
   - apt
   - brew
   - go
@@ -83,7 +74,6 @@ installerPreference:
   - gem
   - appimage
   - script
-  - ansible
   - binary
   windows:
   - choco
@@ -95,12 +85,10 @@ installerPreference:
   - pipx
   - gem
   - script
-  - ansible
   - binary
   zypper:
   - flatpak
   - snap
-  - whalebrew
   - zypper
   - brew
   - go
@@ -110,7 +98,6 @@ installerPreference:
   - gem
   - appimage
   - script
-  - ansible
   - binary
 softwarePackages:
   ack:
@@ -341,46 +328,6 @@ softwarePackages:
     _docs: https://angular.io/docs
     brew: angular-cli
     npm: '@angular/cli'
-  ansible:
-    _name: Ansible
-    _short: Ansible is an open-source automation tool that simplifies IT orchestration, configuration management, and application deployment.
-    _desc: '[Ansible](https://www.ansible.com/) Ansible is a radically simple IT automation platform that makes your applications and systems easier to deploy and maintain'
-    _github: https://github.com/ansible/ansible
-    _bin: ansible
-    _home: https://www.ansible.com/
-    _docs: https://docs.ansible.com/
-    pipx: ansible
-    _post:pipx: pipx inject ansible PyObjC PyObjC-core docker lxml netaddr pexpect python-vagrant pywinrm requests-credssp watchdog
-  ansible-lint:
-    _name: Ansible Lint
-    _short: ansible-lint is a tool that checks playbooks for practices and behavior that could potentially be improved.
-    _desc: '[Ansible Lint](https://github.com/ansible/ansible-lint/) is a command-line tool for linting playbooks, roles and collections aimed toward any Ansible users'
-    _github: https://github.com/ansible/ansible-lint
-    _bin: ansible-lint
-    _home: https://github.com/ansible/ansible-lint/
-    _docs: https://ansible-lint.readthedocs.io/
-    pipx: ansible-lint
-  ansibleconnect:
-    _name: Ansibleconnect
-    _short: ansibleconnect is a repository for Ansible playbooks and roles created by psykulsk.
-    _desc: '[ansibleconnect](https://github.com/psykulsk/ansibleconnect) allows you to connect to all hosts from the inventory with one command'
-    _github: https://github.com/psykulsk/ansibleconnect
-    _bin: ansibleconnect
-    _deps:
-    - sshpass
-    - tmux
-    _home: https://github.com/psykulsk/ansibleconnect
-    _docs: https://github.com/psykulsk/ansibleconnect
-    pipx: ansibleconnect
-  ansibler:
-    _name: Ansibler
-    _short: Ansibler is a tool for managing Ansible playbooks and roles in a structured way.
-    _desc: Megabyte Labs Python project used to extract test information from Molecule and save it as JSON that can be rendered into charts
-    _github: https://github.com/megabyte-labs/ansibler
-    _bin: ansibler
-    _home: https://pypi.org/project/ansibler/
-    _docs: https://pypi.org/project/ansibler/
-    pipx: ansibler
   ansifilter:
     _name: Ansifilter
     _github: false
@@ -12165,17 +12112,6 @@ softwarePackages:
     apt: wget
     dnf: wget
     apk: wget
-  whalebrew:
-    _name: Whalebrew
-    _short: Whalebrew is a tool that allows you to create and run Docker containers as if they were native commands.
-    _desc: Homebrew, but with Docker images (see https://github.com/whalebrew/whalebrew-packages for available packages)
-    _github: https://github.com/whalebrew/whalebrew
-    _bin: whalebrew
-    _home: https://github.com/whalebrew/whalebrew
-    _docs: https://github.com/whalebrew/whalebrew#usage
-    brew: whalebrew
-    script:darwin: curl -L "https://github.com/whalebrew/whalebrew/releases/download/0.4.0/whalebrew-$(uname -s)-$(uname -m)" -o /usr/local/bin/whalebrew; chmod +x /usr/local/bin/whalebrew
-    script:linux: curl -L "https://github.com/whalebrew/whalebrew/releases/download/0.4.0/whalebrew-$(uname -s)-$(uname -m)" -o /usr/local/bin/whalebrew; chmod +x /usr/local/bin/whalebrew
   what-ip:
     _github: false
     _bin: whatip

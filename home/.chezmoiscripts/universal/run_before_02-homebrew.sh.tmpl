@@ -161,7 +161,7 @@ upgradeDarwin() {
         gum log -sl info "Skipping password prompt in headless mode. Set SUDO_PASSWORD env var for auto-login support."
       elif command -v gum > /dev/null; then
         gum log -sl info "Enter the current user's login / admin password. Auto-skipping in 30 seconds. Set SUDO_PASSWORD env var to bypass this prompt."
-        SUDO_PASSWORD="$(timeout 30 gum input --password --placeholder="Enter password (30s timeout).." 2>/dev/null)" || true
+        SUDO_PASSWORD="$(timeout 30 gum input --password --placeholder="Enter password (30s timeout)..")" || true
         export SUDO_PASSWORD
       else
         gum log -sl info "Skipping password prompt (gum not available). Set SUDO_PASSWORD env var for auto-login support."

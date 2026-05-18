@@ -514,6 +514,51 @@ setCIEnvironmentVariables() {
   fi
 }
 
+# @description Prompts for inputs needed to automate the entire installation up front, so the
+#     user can walk away once they've answered. Currently collects:
+#
+#     - `SUDO_PASSWORD` - sudo password, masked input via `gum input --password` when available,
+#       falling back to bash `read -s` so it works before Homebrew/Gum are installed. Skipped
+#       when passwordless sudo is already configured or `SUDO_PASSWORD` is already in the env.
+#
+#     All prompts auto-skip after 30 seconds so unattended runs are not blocked. Any prompt is
+#     bypassed by setting the corresponding env var, `HEADLESS_INSTALL=true`, or running in CI.
+#
+#     @envvar SUDO_PASSWORD     Sudo password; set to skip the sudo prompt entirely.
+#     @envvar HEADLESS_INSTALL  When set, no prompts are shown.
+collectInputsUpfront() {
+  if [ -n "$HEADLESS_INSTALL" ]; then
+    logg info "HEADLESS_INSTALL is set - skipping interactive input collection"
+    return 0
+  fi
+  if [ -n "$CI" ] || [ -n "$TEST_INSTALL" ]; then
+    logg info "CI / TEST_INSTALL is set - skipping interactive input collection"
+    return 0
+  fi
+
+  ### SUDO_PASSWORD prompt
+  if [ -z "$SUDO_PASSWORD" ]; then
+    if sudo -n true 2>/dev/null; then
+      logg info "Passwordless sudo already available - skipping SUDO_PASSWORD prompt"
+    else
+      logg info "Enter the current user's login / admin password. Auto-skipping in 30 seconds. Set SUDO_PASSWORD env var to bypass this prompt."
+      if command -v gum > /dev/null; then
+        SUDO_PASSWORD="$(timeout 30 gum input --password --placeholder="Enter password (30s timeout)..")" || SUDO_PASSWORD=""
+      else
+        SUDO_PASSWORD=""
+        read -s -t 30 -p "Password (30s timeout): " SUDO_PASSWORD || SUDO_PASSWORD=""
+        printf '\n'
+      fi
+      if [ -n "$SUDO_PASSWORD" ]; then
+        export SUDO_PASSWORD
+        logg success "Sudo password collected - the rest of the install will run unattended"
+      else
+        logg info "No sudo password provided - interactive prompts may appear later when sudo is required"
+      fi
+    fi
+  fi
+}
+
 # @description Disconnect from WARP, if connected
 ensureWarpDisconnected() {
   if [ -z "$DEBUG" ]; then
@@ -548,6 +593,20 @@ setupPasswordlessSudo() {
     SUDO_PASSWORD="$(cat "${XDG_DATA_HOME:-$HOME/.local/share}/chezmoi/home/.chezmoitemplates/secrets-$(hostname -s)/SUDO_PASSWORD" | chezmoi decrypt)"
     export SUDO_PASSWORD
   fi
+  if [ -z "$SUDO_PASSWORD" ] && [ -z "$HEADLESS_INSTALL" ]; then
+    logg info "Enter the current user's login / admin password. Auto-skipping in 30 seconds. Set SUDO_PASSWORD env var to bypass this prompt."
+    if command -v gum > /dev/null; then
+      SUDO_PASSWORD="$(timeout 30 gum input --password --placeholder="Enter password (30s timeout)..")" || SUDO_PASSWORD=""
+    else
+      SUDO_PASSWORD=""
+      read -s -t 30 -p "Password (30s timeout): " SUDO_PASSWORD || SUDO_PASSWORD=""
+      printf '\n'
+    fi
+    if [ -n "$SUDO_PASSWORD" ]; then
+      export SUDO_PASSWORD
+    fi
+  fi
+
   if [ -n "$SUDO_PASSWORD" ]; then
     logg info 'Using the acquired sudo password to automatically grant the user passwordless sudo privileges for the duration of the script'
     echo "$SUDO_PASSWORD" | sudo -S sh -c "echo '$(whoami) ALL=(ALL:ALL) NOPASSWD: ALL # TEMPORARY FOR INSTALL DOCTOR' | tee -a /etc/sudoers > /dev/null"
@@ -557,13 +616,7 @@ setupPasswordlessSudo() {
       logg warn 'HEADLESS_INSTALL is set but no SUDO_PASSWORD is available. Attempting to continue without passwordless sudo.'
       return 0
     fi
-    logg info 'Sudo password required. You have 30 seconds to enter your password (auto-skips on timeout).'
-    logg info 'To bypass this prompt, set the SUDO_PASSWORD environment variable or use HEADLESS_INSTALL=true.'
-    if timeout 30 bash -c "echo '$(whoami) ALL=(ALL:ALL) NOPASSWD: ALL # TEMPORARY FOR INSTALL DOCTOR' | sudo tee -a /etc/sudoers > /dev/null" 2>/dev/null; then
-      logg success 'Passwordless sudo granted successfully'
-    else
-      logg warn 'Sudo prompt timed out or failed. Continuing without passwordless sudo - some operations may prompt for a password.'
-    fi
+    logg warn 'No sudo password was provided. Continuing without passwordless sudo - some operations may prompt for a password.'
   fi
 }
 
@@ -984,23 +1037,26 @@ function ensureAppleUser() {
 #
 #     1. **User Setup** - Creates a non-root user if running as root (required for Homebrew)
 #     2. **Environment Setup** - Loads Homebrew, sets environment variables, configures CI defaults
-#     3. **Network Preparation** - Disconnects WARP VPN to prevent conflicts during provisioning
-#     4. **Sudo Setup** - Temporarily grants passwordless sudo (with timeout, auto-skips on failure)
-#     5. **Dependencies** - Installs basic system dependencies (curl, git, etc.)
-#     6. **Repository** - Clones or updates the Install Doctor source repository
-#     7. **macOS Setup** - Ensures full disk access and imports CloudFlare certificates (macOS only)
-#     8. **Homebrew** - Ensures Homebrew is installed and installs required brew packages
-#     9. **Qubes** - Handles Qubes dom0 provisioning if applicable
-#     10. **Chezmoi Init** - Initializes Chezmoi configuration and prompts for settings
-#     11. **Chezmoi Apply** - Runs the main provisioning via `chezmoi apply`
-#     12. **Cleanup** - Removes temporary passwordless sudo, installs VIM plugins
-#     13. **Reboot Check** - Reboots the system if required by updates
-#     14. **Post-Install** - Displays post-installation instructions
+#     3. **Input Collection** - Prompts the user up front for the sudo password (and anything else
+#        the script needs) so the rest of the run can proceed unattended
+#     4. **Network Preparation** - Disconnects WARP VPN to prevent conflicts during provisioning
+#     5. **Sudo Setup** - Temporarily grants passwordless sudo (with timeout, auto-skips on failure)
+#     6. **Dependencies** - Installs basic system dependencies (curl, git, etc.)
+#     7. **Repository** - Clones or updates the Install Doctor source repository
+#     8. **macOS Setup** - Ensures full disk access and imports CloudFlare certificates (macOS only)
+#     9. **Homebrew** - Ensures Homebrew is installed and installs required brew packages
+#     10. **Qubes** - Handles Qubes dom0 provisioning if applicable
+#     11. **Chezmoi Init** - Initializes Chezmoi configuration and prompts for settings
+#     12. **Chezmoi Apply** - Runs the main provisioning via `chezmoi apply`
+#     13. **Cleanup** - Removes temporary passwordless sudo, installs VIM plugins
+#     14. **Reboot Check** - Reboots the system if required by updates
+#     15. **Post-Install** - Displays post-installation instructions
 provisionLogic() {
   logg info "Ensuring script is not run with root" && ensureAppleUser
   logg info "Attempting to load Homebrew" && loadHomebrew
   logg info "Setting environment variables" && setEnvironmentVariables
   logg info "Handling CI variables" && setCIEnvironmentVariables
+  logg info "Collecting required inputs up front" && collectInputsUpfront
   logg info "Ensuring WARP is disconnected" && ensureWarpDisconnected
   logg info "Applying passwordless sudo" && setupPasswordlessSudo
   logg info "Ensuring system dependencies are installed" && ensureBasicDeps

@@ -429,6 +429,42 @@ setCIEnvironmentVariables() {
   fi
 }
 
+# @description Prompts for inputs needed to automate the entire installation up front, so the
+#     user can walk away once they've answered. Currently collects SUDO_PASSWORD using gum
+#     (with bash `read -s` fallback) so the prompt is masked. Auto-skips after 30 seconds.
+#     Skipped when HEADLESS_INSTALL / CI is set or when passwordless sudo is already configured.
+collectInputsUpfront() {
+  if [ -n "$HEADLESS_INSTALL" ]; then
+    logg info "HEADLESS_INSTALL is set - skipping interactive input collection"
+    return 0
+  fi
+  if [ -n "$CI" ] || [ -n "$TEST_INSTALL" ]; then
+    logg info "CI / TEST_INSTALL is set - skipping interactive input collection"
+    return 0
+  fi
+
+  if [ -z "$SUDO_PASSWORD" ]; then
+    if sudo -n true 2>/dev/null; then
+      logg info "Passwordless sudo already available - skipping SUDO_PASSWORD prompt"
+    else
+      logg info "Enter the current user's login / admin password. Auto-skipping in 30 seconds. Set SUDO_PASSWORD env var to bypass this prompt."
+      if command -v gum > /dev/null; then
+        SUDO_PASSWORD="$(timeout 30 gum input --password --placeholder="Enter password (30s timeout)..")" || SUDO_PASSWORD=""
+      else
+        SUDO_PASSWORD=""
+        read -s -t 30 -p "Password (30s timeout): " SUDO_PASSWORD || SUDO_PASSWORD=""
+        printf '\n'
+      fi
+      if [ -n "$SUDO_PASSWORD" ]; then
+        export SUDO_PASSWORD
+        logg success "Sudo password collected - the rest of the install will run unattended"
+      else
+        logg info "No sudo password provided - interactive prompts may appear later when sudo is required"
+      fi
+    fi
+  fi
+}
+
 # @description Disconnect from WARP, if connected
 ensureWarpDisconnected() {
   if [ -z "$DEBUG" ]; then
@@ -450,6 +486,19 @@ setupPasswordlessSudo() {
     SUDO_PASSWORD="$(cat "${XDG_DATA_HOME:-$HOME/.local/share}/chezmoi/home/.chezmoitemplates/secrets-$(hostname -s)/SUDO_PASSWORD" | chezmoi decrypt)"
     export SUDO_PASSWORD
   fi
+  if [ -z "$SUDO_PASSWORD" ] && [ -z "$HEADLESS_INSTALL" ]; then
+    logg info "Enter the current user's login / admin password. Auto-skipping in 30 seconds. Set SUDO_PASSWORD env var to bypass this prompt."
+    if command -v gum > /dev/null; then
+      SUDO_PASSWORD="$(timeout 30 gum input --password --placeholder="Enter password (30s timeout)..")" || SUDO_PASSWORD=""
+    else
+      SUDO_PASSWORD=""
+      read -s -t 30 -p "Password (30s timeout): " SUDO_PASSWORD || SUDO_PASSWORD=""
+      printf '\n'
+    fi
+    if [ -n "$SUDO_PASSWORD" ]; then
+      export SUDO_PASSWORD
+    fi
+  fi
   if [ -n "$SUDO_PASSWORD" ]; then
     logg info 'Using the acquired sudo password to automatically grant the user passwordless sudo privileges for the duration of the script'
     echo "$SUDO_PASSWORD" | sudo -S sh -c "echo '$(whoami) ALL=(ALL:ALL) NOPASSWD: ALL # TEMPORARY FOR INSTALL DOCTOR' | tee -a /etc/sudoers > /dev/null"
@@ -457,9 +506,11 @@ setupPasswordlessSudo() {
     # Old method below does not work on macOS due to multiple sudo prompts
     # printf '%s\n%s\n' "$SUDO_PASSWORD" | sudo -S echo "$(whoami) ALL=(ALL:ALL) NOPASSWD: ALL # TEMPORARY FOR INSTALL DOCTOR" | sudo -S tee -a /etc/sudoers > /dev/null
   else
-    logg info 'Press CTRL+C to bypass this prompt to either enter your password when needed or perform a non-privileged installation'
-    logg info 'Note: Non-privileged installations are not yet supported'
-    echo "$(whoami) ALL=(ALL:ALL) NOPASSWD: ALL # TEMPORARY FOR INSTALL DOCTOR" | sudo tee -a /etc/sudoers > /dev/null
+    if [ -n "$HEADLESS_INSTALL" ]; then
+      logg warn 'HEADLESS_INSTALL is set but no SUDO_PASSWORD is available. Attempting to continue without passwordless sudo.'
+      return 0
+    fi
+    logg warn 'No sudo password was provided. Continuing without passwordless sudo - some operations may prompt for a password.'
   fi
 }
 
@@ -856,6 +907,7 @@ provisionLogic() {
   logg info "Attempting to load Homebrew" && loadHomebrew
   logg info "Setting environment variables" && setEnvironmentVariables
   logg info "Handling CI variables" && setCIEnvironmentVariables
+  logg info "Collecting required inputs up front" && collectInputsUpfront
   logg info "Ensuring WARP is disconnected" && ensureWarpDisconnected
   logg info "Applying passwordless sudo" && setupPasswordlessSudo
   logg info "Ensuring system Homebrew dependencies are installed" && ensureBasicDeps

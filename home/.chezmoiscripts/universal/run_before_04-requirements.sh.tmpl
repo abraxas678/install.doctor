@@ -26,24 +26,84 @@ if [ -d /Applications ] && [ -d /System ]; then
     ### Force serial Homebrew downloads. Newer Homebrew releases ship a parallel
     ### downloader that races with itself on large bottles (go, python, ruby,
     ### rust, volta, java@beta, macfuse, ...) producing
-    ### "process has already locked ...<bottle>.incomplete" errors that recur
-    ### on every retry. We also bypass `brew bundle` entirely below because it
-    ### still parallelises internally even with this env var set; instead we
-    ### install each formula / cask one at a time.
+    ### "process has already locked ...<bottle>.incomplete" errors. We also
+    ### bypass `brew bundle` entirely below (it still parallelises internally)
+    ### and install each formula / cask one at a time.
     export HOMEBREW_DOWNLOAD_CONCURRENCY=1
     export HOMEBREW_NO_AUTO_UPDATE="${HOMEBREW_NO_AUTO_UPDATE:-1}"
+    export HOMEBREW_NO_ANALYTICS=1
+    export HOMEBREW_NO_ENV_HINTS=1
 
-    ### Aggressive cleanup of the Homebrew downloads cache to clear any locks
-    ### left behind by a previous interrupted run.
+    BREW_DOWNLOADS_DIR="$(brew --cache 2>/dev/null)/downloads"
+
+    ### Nuke every cached download artifact for the bottle/formula/cask we are
+    ### about to install: the bottle archive, its `.incomplete` partial, any
+    ### `flock`-style lock file with that name, and the manifest. Brew creates
+    ### the `.incomplete` file fresh and grabs its lock; if a stale lock from a
+    ### prior crashed worker is still around, the new install hits "process
+    ### has already locked ...". Wiping all matching files removes the inode
+    ### the stale lock is attached to and lets brew start clean.
+    purgeBrewCacheFor() {
+      local NAME="$1"
+      if [ -z "$NAME" ] || [ ! -d "$BREW_DOWNLOADS_DIR" ]; then
+        return 0
+      fi
+      ### bottle / cask filenames embed the name between `--` separators
+      find "$BREW_DOWNLOADS_DIR" -maxdepth 1 -type f \( -name "*--${NAME}--*" -o -name "*--${NAME}-*" -o -name "*--${NAME}@*" \) -delete 2>/dev/null || true
+    }
+
     cleanupBrewDownloads() {
-      BREW_DOWNLOADS_DIR="$(brew --cache 2>/dev/null)/downloads"
       if [ -d "$BREW_DOWNLOADS_DIR" ]; then
         find "$BREW_DOWNLOADS_DIR" -maxdepth 1 -name '*.incomplete*' -delete 2>/dev/null || true
         find "$BREW_DOWNLOADS_DIR" -maxdepth 1 -name '*.lock' -delete 2>/dev/null || true
         find "$BREW_DOWNLOADS_DIR" -maxdepth 1 -type f -size 0 -delete 2>/dev/null || true
       fi
     }
-    gum log -sl info "Cleaning up any stale download locks in $(brew --cache 2>/dev/null)/downloads"
+
+    ### Kill any brew worker processes still running from a previous attempt.
+    ### Excludes our own shell (chezmoi/bash) — pkill -f matches command lines
+    ### and the running shell's cmdline is `bash` or `chezmoi`, not `brew`.
+    killStaleBrewWorkers() {
+      pkill -f '^/.*[Hh]omebrew/.*ruby.*brew' 2>/dev/null || true
+      pkill -f 'brew (install|fetch|bundle|update|cleanup|upgrade)' 2>/dev/null || true
+    }
+
+    ### Wrapper: install a single formula or cask, retrying with progressively
+    ### more aggressive cleanup. Always returns 0 so the loop continues.
+    ### Args: <formula|cask> <name>
+    brewInstallSafely() {
+      local KIND="$1"
+      local NAME="$2"
+      local FLAGS
+      if [ "$KIND" = "cask" ]; then
+        FLAGS="--cask --no-quarantine --quiet"
+        brew list --cask "$NAME" > /dev/null 2>&1 && { gum log -sl info "cask $NAME already installed"; return 0; }
+      else
+        FLAGS="--quiet"
+        brew list --formula "$NAME" > /dev/null 2>&1 && { gum log -sl info "$NAME already installed"; return 0; }
+      fi
+
+      local ATTEMPT=0
+      local MAX_ATTEMPTS=3
+      while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
+        ATTEMPT=$((ATTEMPT + 1))
+        gum log -sl info "Installing $KIND $NAME (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+        cleanupBrewDownloads
+        purgeBrewCacheFor "$NAME"
+        if HOMEBREW_DOWNLOAD_CONCURRENCY=1 HOMEBREW_NO_AUTO_UPDATE=1 brew install $FLAGS "$NAME"; then
+          return 0
+        fi
+        gum log -sl warn "Install attempt $ATTEMPT for $NAME failed; killing stale brew workers and retrying"
+        killStaleBrewWorkers
+        sleep 2
+      done
+      gum log -sl warn "Failed to install $KIND $NAME after $MAX_ATTEMPTS attempts; continuing"
+      INSTALL_FAILED="${INSTALL_FAILED} $NAME"
+      return 0
+    }
+
+    gum log -sl info "Cleaning up any stale download locks in $BREW_DOWNLOADS_DIR"
+    killStaleBrewWorkers
     cleanupBrewDownloads
 
     ### Ensure required taps are present
@@ -55,45 +115,22 @@ if [ -d /Applications ] && [ -d /System ]; then
       fi
     done
 
-    ### Install base formulae one at a time. Sequential `brew install` calls
-    ### avoid the parallel-downloader lock races that block `brew bundle`.
+    ### Install base formulae one at a time, with per-package retry + cleanup.
     logg 'Installing base Homebrew formulae sequentially'
     INSTALL_FAILED=""
     for FORMULA in coreutils findutils m-cli age bash expect ffmpeg fzf gawk git-delta glow gnupg go gsed gum htmlq jq mas media-info moreutils m4 node openssh pinentry-mac pipx pkgconf progress python@3.12 python@3.11 rsync ruby rust go-task/tap/go-task volta yarn yq zx; do
-      if brew list --formula "$FORMULA" > /dev/null 2>&1; then
-        gum log -sl info "$FORMULA already installed"
-        continue
-      fi
-      gum log -sl info "Installing formula: $FORMULA"
-      cleanupBrewDownloads
-      if ! HOMEBREW_DOWNLOAD_CONCURRENCY=1 brew install --quiet "$FORMULA"; then
-        gum log -sl warn "Failed to install $FORMULA via brew; continuing"
-        INSTALL_FAILED="${INSTALL_FAILED} $FORMULA"
-      fi
+      brewInstallSafely formula "$FORMULA"
     done
 
     ### Install casks one at a time as well.
     logg 'Installing base Homebrew casks sequentially'
     for CASK in docker-desktop macfuse; do
-      if brew list --cask "$CASK" > /dev/null 2>&1; then
-        gum log -sl info "Cask $CASK already installed"
-        continue
-      fi
-      gum log -sl info "Installing cask: $CASK"
-      cleanupBrewDownloads
-      if ! HOMEBREW_DOWNLOAD_CONCURRENCY=1 brew install --cask --quiet --no-quarantine "$CASK"; then
-        gum log -sl warn "Failed to install cask $CASK via brew; continuing"
-        INSTALL_FAILED="${INSTALL_FAILED} $CASK"
-      fi
+      brewInstallSafely cask "$CASK"
     done
 
     ### Install java@beta only if no Java runtime is present already.
     if ! /usr/libexec/java_home --failfast > /dev/null 2>&1; then
-      if ! brew list --cask java@beta > /dev/null 2>&1; then
-        gum log -sl info 'No Java runtime detected; installing cask java@beta'
-        cleanupBrewDownloads
-        HOMEBREW_DOWNLOAD_CONCURRENCY=1 brew install --cask --quiet --no-quarantine java@beta || gum log -sl warn 'Failed to install cask java@beta; continuing'
-      fi
+      brewInstallSafely cask java@beta
     else
       gum log -sl info 'A Java runtime is already installed; skipping cask java@beta'
     fi

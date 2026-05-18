@@ -23,23 +23,71 @@ if [ -d /Applications ] && [ -d /System ]; then
 
   ### Check for presence of Homebrew
   if command -v brew > /dev/null; then
+    ### Clean up stale Homebrew download locks from interrupted previous runs.
+    ### Newer Homebrew releases place a lock on `.incomplete` files in the
+    ### downloads cache; if a prior `brew fetch` / `brew bundle` was killed,
+    ### those locks remain and block subsequent fetches with "process has
+    ### already locked ..." errors.
+    BREW_DOWNLOADS_DIR="$(brew --cache 2>/dev/null)/downloads"
+    if [ -d "$BREW_DOWNLOADS_DIR" ]; then
+      gum log -sl info "Cleaning up any stale .incomplete download locks in $BREW_DOWNLOADS_DIR"
+      find "$BREW_DOWNLOADS_DIR" -maxdepth 1 -name '*.incomplete*' -delete 2>/dev/null || true
+    fi
+
     ### Install base dependencies
     logg 'Installing base dependencies for macOS using brew bundle'
     gum log -sl info 'Dependencies: age jq node glow go go-task/tap/go-task gnupg gum m-cli progress volta yq m-cli yq zx'
     gum log -sl info 'GNU compatibility dependencies: coreutils findutils'
 
-    brew bundle --verbose --file=/dev/stdin <<EOF
+    ### Capture the rendered Brewfile once so retry attempts use identical input
+    BREWFILE_CONTENTS=$(cat <<EOF
 {{ includeTemplate "darwin/Brewfile" . -}}
 EOF
+)
+
+    ### `brew bundle` can fail due to transient lock conflicts on its parallel
+    ### downloads; retry a couple of times, clearing the lock files between
+    ### attempts. Suppress the non-zero exit so the rest of the script can
+    ### continue with whatever was successfully installed.
+    BREW_BUNDLE_ATTEMPTS=0
+    BREW_BUNDLE_MAX_ATTEMPTS=3
+    BREW_BUNDLE_OK=""
+    while [ "$BREW_BUNDLE_ATTEMPTS" -lt "$BREW_BUNDLE_MAX_ATTEMPTS" ]; do
+      BREW_BUNDLE_ATTEMPTS=$((BREW_BUNDLE_ATTEMPTS + 1))
+      if printf '%s\n' "$BREWFILE_CONTENTS" | brew bundle --verbose --file=/dev/stdin; then
+        BREW_BUNDLE_OK=1
+        break
+      fi
+      gum log -sl warn "brew bundle failed (attempt $BREW_BUNDLE_ATTEMPTS/$BREW_BUNDLE_MAX_ATTEMPTS)"
+      if [ "$BREW_BUNDLE_ATTEMPTS" -lt "$BREW_BUNDLE_MAX_ATTEMPTS" ] && [ -d "$BREW_DOWNLOADS_DIR" ]; then
+        gum log -sl info "Clearing .incomplete download locks before retry"
+        find "$BREW_DOWNLOADS_DIR" -maxdepth 1 -name '*.incomplete*' -delete 2>/dev/null || true
+      fi
+    done
+    if [ -z "$BREW_BUNDLE_OK" ]; then
+      gum log -sl warn "brew bundle did not complete cleanly after $BREW_BUNDLE_MAX_ATTEMPTS attempts. Continuing with whatever was installed."
+    fi
 
     ### Ensure Python version is 3.11 or higher
-    PYTHON_VERSION="$(python3 --version | sed 's/Python //')"
-    MIN_PYTHON_VERSION="3.11.0"
-    if [ "$(printf '%s\n' "$MIN_PYTHON_VERSION" "$PYTHON_VERSION" | sort -V | head -n1)" = "$MIN_PYTHON_VERSION" ]; then
-      gum log -sl info "Minimum Python version satisfied (minimum: $MIN_PYTHON_VERSION, current: $PYTHON_VERSION)"
+    if command -v python3 > /dev/null; then
+      PYTHON_VERSION="$(python3 --version 2>/dev/null | sed 's/Python //')"
+      MIN_PYTHON_VERSION="3.11.0"
+      if [ -n "$PYTHON_VERSION" ] && [ "$(printf '%s\n' "$MIN_PYTHON_VERSION" "$PYTHON_VERSION" | sort -V | head -n1)" = "$MIN_PYTHON_VERSION" ]; then
+        gum log -sl info "Minimum Python version satisfied (minimum: $MIN_PYTHON_VERSION, current: $PYTHON_VERSION)"
+      else
+        ### Prefer python@3.12 over python@3.11, but only link a version that is actually installed.
+        if brew list --formula python@3.12 > /dev/null 2>&1; then
+          gum log -sl info 'Updating Python 3 version with brew link --overwrite python@3.12'
+          brew link --overwrite python@3.12 || gum log -sl warn 'brew link --overwrite python@3.12 failed; continuing'
+        elif brew list --formula python@3.11 > /dev/null 2>&1; then
+          gum log -sl info 'Updating Python 3 version with brew link --overwrite python@3.11'
+          brew link --overwrite python@3.11 || gum log -sl warn 'brew link --overwrite python@3.11 failed; continuing'
+        else
+          gum log -sl warn 'Neither python@3.12 nor python@3.11 is installed via Homebrew; skipping brew link step'
+        fi
+      fi
     else
-      gum log -sl info 'Updating Python 3 version with brew link --overwrite python@3.11'
-      brew link --overwrite python@3.11
+      gum log -sl warn 'python3 is not available on PATH; skipping Python version check'
     fi
   else
     gum log -sl error 'brew was not found in the PATH'

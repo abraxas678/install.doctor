@@ -110,9 +110,17 @@ importSettingsMobileConfig() {
       gum log -sl info 'profiles command not available; skipping mobileconfig install'
       return 0
     fi
-    if profiles help 2>&1 | grep -q 'no longer supports installs'; then
-      gum log -sl info 'The profiles CLI no longer supports installing configuration profiles on this macOS version; skipping. Install them manually from System Settings > Privacy & Security > Profiles.'
-      return 0
+    ### Starting with macOS Ventura (13.0) the `profiles install` subcommand
+    ### prints "profiles tool no longer supports installs. Use System
+    ### Settings Profiles to add configuration profiles." and exits non-zero.
+    ### Detect by major macOS version rather than probing the CLI (which
+    ### would prompt for a sudo password just to discover the deprecation).
+    if command -v sw_vers > /dev/null; then
+      MACOS_MAJOR="$(sw_vers -productVersion 2>/dev/null | awk -F. '{print $1}')"
+      if [ -n "$MACOS_MAJOR" ] && [ "$MACOS_MAJOR" -ge 13 ] 2>/dev/null; then
+        gum log -sl info 'The profiles CLI no longer supports installing configuration profiles on macOS 13+; skipping. Install them manually from System Settings > Privacy & Security > Profiles.'
+        return 0
+      fi
     fi
     for FILE in "${XDG_DATA_HOME:-$HOME/.local/share}/chezmoi/home/dot_config/macos/mobileconfig/"*.mobileconfig; do
       [ -f "$FILE" ] || continue

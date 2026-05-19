@@ -331,7 +331,7 @@ installDocker() {
     ### macOS
     if [ ! -d /Applications/Docker.app ]; then
       gum log -sl info 'Installing Docker on macOS via Homebrew cask'
-      brew install --cask --quiet --no-quarantine docker
+      brew install --cask --quiet docker
     else
       gum log -sl info 'Docker appears to be installed already'
     fi

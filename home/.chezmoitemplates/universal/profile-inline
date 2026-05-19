@@ -47,3 +47,31 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ### Remove ~/.bash_sessions
 export HISTFILE="$XDG_STATE_HOME/bash/history"
+
+### Sudo fail-safe for chezmoi scripts.
+###
+### `scripts/provision.sh` writes /tmp/install-doctor-passwordless-sudo when
+### it has successfully granted the current user NOPASSWD sudo for the
+### duration of the run. If that marker is MISSING by the time a chezmoi
+### script sources this file, we wrap `sudo` so it never blocks on an
+### interactive password prompt — instead the call fails fast with a
+### warning so the script continues to the next step.
+###
+### Without this wrapper a failed `setupPasswordlessSudo` (wrong SUDO_PASSWORD,
+### missing secret, etc.) would cause chezmoi scripts to silently stall on
+### `sudo scutil --set HostName`, `sudo dscl ...`, `sudo systemsetup ...` and
+### similar lines, waiting on a `Password:` prompt the user can't see.
+if [ ! -f /tmp/install-doctor-passwordless-sudo ] && [ -z "$INSTALL_DOCTOR_SUDO_WRAPPED" ]; then
+  export INSTALL_DOCTOR_NO_SUDO=1
+  export SUDO_ASKPASS="${SUDO_ASKPASS:-/usr/bin/false}"
+  sudo() {
+    if command sudo -n true 2>/dev/null; then
+      command sudo "$@"
+    else
+      printf 'WARN sudo is unavailable (no passwordless grant); skipping: sudo %s\n' "$*" >&2
+      return 0
+    fi
+  }
+  export -f sudo
+  export INSTALL_DOCTOR_SUDO_WRAPPED=1
+fi

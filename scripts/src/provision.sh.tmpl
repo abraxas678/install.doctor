@@ -154,39 +154,82 @@ ensureWarpDisconnected() {
 # @description Notify user that they can press CTRL+C to prevent `/etc/sudoers` from being modified (which is currently required for headless installs on some systems).
 #     Additionally, this function will add the current user to `/etc/sudoers` so that headless automation is possible.
 setupPasswordlessSudo() {
-  sudo -n true || SUDO_EXIT_CODE=$?
+  ### Helper: confirm a candidate password actually works for `sudo`.
+  _idSudoPasswordWorks() {
+    local CANDIDATE="$1"
+    [ -z "$CANDIDATE" ] && return 1
+    sudo -k 2>/dev/null || true
+    printf '%s\n' "$CANDIDATE" | sudo -S -p '' -k true >/dev/null 2>&1
+  }
+
+  ### Marker file lets later scripts (and chezmoi) confirm passwordless
+  ### sudo is active. When it isn't, exporting SUDO_ASKPASS=/usr/bin/false
+  ### makes every subsequent `sudo` invocation fail immediately instead of
+  ### blocking on an interactive prompt mid chezmoi run.
+  _idMarkPasswordless() {
+    : > /tmp/install-doctor-passwordless-sudo
+    unset SUDO_ASKPASS
+  }
+  _idMarkBlocked() {
+    rm -f /tmp/install-doctor-passwordless-sudo
+    export SUDO_ASKPASS=/usr/bin/false
+    export INSTALL_DOCTOR_NO_SUDO=1
+  }
+
+  sudo -n true 2>/dev/null && { logg info 'Passwordless sudo is already available'; _idMarkPasswordless; return 0; }
+
   logg info 'Your user will temporarily be granted passwordless sudo for the duration of the script'
-  if [ -n "$SUDO_EXIT_CODE" ] && [ -z "$SUDO_PASSWORD" ] && command -v chezmoi > /dev/null && [ -f "${XDG_DATA_HOME:-$HOME/.local/share}/chezmoi/home/.chezmoitemplates/secrets-$(hostname -s)/SUDO_PASSWORD" ] && [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/age/chezmoi.txt" ]; then
+
+  if [ -z "$SUDO_PASSWORD" ] && command -v chezmoi > /dev/null && [ -f "${XDG_DATA_HOME:-$HOME/.local/share}/chezmoi/home/.chezmoitemplates/secrets-$(hostname -s)/SUDO_PASSWORD" ] && [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/age/chezmoi.txt" ]; then
     logg info "Acquiring SUDO_PASSWORD by using Chezmoi to decrypt ${XDG_DATA_HOME:-$HOME/.local/share}/chezmoi/home/.chezmoitemplates/secrets-$(hostname -s)/SUDO_PASSWORD"
-    SUDO_PASSWORD="$(cat "${XDG_DATA_HOME:-$HOME/.local/share}/chezmoi/home/.chezmoitemplates/secrets-$(hostname -s)/SUDO_PASSWORD" | chezmoi decrypt)"
+    SUDO_PASSWORD="$(chezmoi decrypt < "${XDG_DATA_HOME:-$HOME/.local/share}/chezmoi/home/.chezmoitemplates/secrets-$(hostname -s)/SUDO_PASSWORD" 2>/dev/null | tr -d '\r' | sed -e 's/[[:space:]]*$//')"
+    if ! _idSudoPasswordWorks "$SUDO_PASSWORD"; then
+      logg warn 'The SUDO_PASSWORD decrypted from Chezmoi did not authenticate; discarding it'
+      SUDO_PASSWORD=""
+    fi
     export SUDO_PASSWORD
   fi
+
   if [ -z "$SUDO_PASSWORD" ] && [ -z "$HEADLESS_INSTALL" ]; then
-    logg info "Enter the current user's login / admin password. Auto-skipping in 30 seconds. Set SUDO_PASSWORD env var to bypass this prompt."
-    if command -v gum > /dev/null; then
-      SUDO_PASSWORD="$(timeout 30 gum input --password --placeholder="Enter password (30s timeout)..")" || SUDO_PASSWORD=""
-    else
-      SUDO_PASSWORD=""
-      read -s -t 30 -p "Password (30s timeout): " SUDO_PASSWORD || SUDO_PASSWORD=""
-      printf '\n'
-    fi
-    if [ -n "$SUDO_PASSWORD" ]; then
-      export SUDO_PASSWORD
-    fi
+    local ATTEMPT=0
+    while [ "$ATTEMPT" -lt 3 ] && [ -z "$SUDO_PASSWORD" ]; do
+      ATTEMPT=$((ATTEMPT + 1))
+      logg info "Enter the current user's login / admin password (attempt $ATTEMPT/3). Auto-skipping in 30 seconds. Set SUDO_PASSWORD env var to bypass this prompt."
+      local CANDIDATE=""
+      if command -v gum > /dev/null; then
+        CANDIDATE="$(timeout 30 gum input --password --placeholder="Enter password (30s timeout)..")" || CANDIDATE=""
+      else
+        read -s -t 30 -p "Password (30s timeout): " CANDIDATE || CANDIDATE=""
+        printf '\n'
+      fi
+      if _idSudoPasswordWorks "$CANDIDATE"; then
+        SUDO_PASSWORD="$CANDIDATE"
+        export SUDO_PASSWORD
+        break
+      else
+        [ -n "$CANDIDATE" ] && logg warn 'That password did not authenticate; try again'
+      fi
+    done
   fi
-  if [ -n "$SUDO_PASSWORD" ]; then
+
+  if [ -n "$SUDO_PASSWORD" ] && _idSudoPasswordWorks "$SUDO_PASSWORD"; then
     logg info 'Using the acquired sudo password to automatically grant the user passwordless sudo privileges for the duration of the script'
-    echo "$SUDO_PASSWORD" | sudo -S sh -c "echo '$(whoami) ALL=(ALL:ALL) NOPASSWD: ALL # TEMPORARY FOR INSTALL DOCTOR' | tee -a /etc/sudoers > /dev/null"
-    echo ""
-    # Old method below does not work on macOS due to multiple sudo prompts
-    # printf '%s\n%s\n' "$SUDO_PASSWORD" | sudo -S echo "$(whoami) ALL=(ALL:ALL) NOPASSWD: ALL # TEMPORARY FOR INSTALL DOCTOR" | sudo -S tee -a /etc/sudoers > /dev/null
-  else
-    if [ -n "$HEADLESS_INSTALL" ]; then
-      logg warn 'HEADLESS_INSTALL is set but no SUDO_PASSWORD is available. Attempting to continue without passwordless sudo.'
+    printf '%s\n' "$SUDO_PASSWORD" | sudo -S -p '' sh -c "printf '%s\n' '$(whoami) ALL=(ALL:ALL) NOPASSWD: ALL # TEMPORARY FOR INSTALL DOCTOR' >> /etc/sudoers"
+    sudo -k 2>/dev/null || true
+    if sudo -n true 2>/dev/null; then
+      _idMarkPasswordless
       return 0
     fi
-    logg warn 'No sudo password was provided. Continuing without passwordless sudo - some operations may prompt for a password.'
+    logg warn 'NOPASSWD entry was written but `sudo -n true` still fails; treating as blocked'
   fi
+
+  if [ -n "$HEADLESS_INSTALL" ]; then
+    logg warn 'HEADLESS_INSTALL is set but no SUDO_PASSWORD is available. Sudo-requiring steps will be skipped.'
+  else
+    logg warn 'No sudo password was acquired. Sudo-requiring steps will be skipped instead of prompting interactively.'
+  fi
+  _idMarkBlocked
+  return 0
 }
 
 # @description Ensure sys-whonix is configured (for Qubes dom0)
@@ -395,9 +438,11 @@ initChezmoiAndPrompt() {
 }
 
 # @description When a reboot is triggered by softwareupdate on macOS, other utilities that require
-#     a reboot are also installed to save on reboots.
+#     a reboot are also installed to save on reboots. macfuse was dropped (EOL'd in favor of
+#     FUSE-T / Mounty and consistently breaks on new macOS kernel-extension rules), so this is
+#     a no-op for now. Add reboot-bundled installs here when needed.
 beforeRebootDarwin() {
-  logg info "Ensuring macfuse is installed" && brew install --cask --no-quarantine --quiet macfuse
+  :
 }
 
 # @description Save the log of the provision process to `$HOME/.local/var/log/install.doctor/install.doctor.$(date +%s).log` and add the Chezmoi
@@ -492,6 +537,7 @@ removePasswordlessSudo() {
   else
     sudo sed -i '/# TEMPORARY FOR INSTALL DOCTOR/d' /etc/sudoers || logg warn 'Failed to remove passwordless sudo from the /etc/sudoers file'
   fi
+  rm -f /tmp/install-doctor-passwordless-sudo
 }
 
 # @description Render the `docs/terminal/post-install.md` file to the terminal at the end of the provisioning process

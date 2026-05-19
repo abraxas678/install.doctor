@@ -59,7 +59,7 @@ if [[ ! "$(test -d /proc && grep Microsoft /proc/version > /dev/null)" ]]; then
   if [ -d /System ] && [ -d /Applications ]; then
     ### Install on macOS
     if [ ! -d "/Applications/Cloudflare WARP.app" ]; then
-      brew install --cask --no-quarantine --quiet cloudflare-warp
+      brew install --cask --quiet cloudflare-warp
     else
       gum log -sl info 'Cloudflare WARP already installed'
     fi

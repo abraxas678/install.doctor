@@ -76,7 +76,11 @@ if [ -d /Applications ] && [ -d /System ]; then
       local NAME="$2"
       local FLAGS
       if [ "$KIND" = "cask" ]; then
-        FLAGS="--cask --no-quarantine --quiet"
+        ### Homebrew removed the `--[no-]quarantine` flag with no replacement
+        ### ("Calling the `--[no-]quarantine` switch is disabled!"). Casks are
+        ### now installed quarantined by Gatekeeper just like any other Mac
+        ### app; the user can right-click → Open the first time if blocked.
+        FLAGS="--cask --quiet"
         brew list --cask "$NAME" > /dev/null 2>&1 && { gum log -sl info "cask $NAME already installed"; return 0; }
       else
         FLAGS="--quiet"
@@ -106,9 +110,13 @@ if [ -d /Applications ] && [ -d /System ]; then
     killStaleBrewWorkers
     cleanupBrewDownloads
 
-    ### Ensure required taps are present
+    ### Ensure required taps are present.
+    ### homebrew/bundle, homebrew/services and homebrew/command-not-found were
+    ### deprecated by Homebrew and now error out ("This tap is now empty and
+    ### all its contents were either deleted or migrated."), so we no longer
+    ### attempt to tap them.
     logg 'Ensuring required Homebrew taps are present'
-    for TAP in homebrew/bundle homebrew/autoupdate homebrew/services homebrew/command-not-found go-task/tap; do
+    for TAP in homebrew/autoupdate go-task/tap; do
       if ! brew tap | grep -qx "$TAP"; then
         gum log -sl info "Tapping $TAP"
         HOMEBREW_DOWNLOAD_CONCURRENCY=1 brew tap "$TAP" || gum log -sl warn "Failed to tap $TAP; continuing"
@@ -123,16 +131,22 @@ if [ -d /Applications ] && [ -d /System ]; then
     done
 
     ### Install casks one at a time as well.
+    ### macfuse was dropped: it is EOL'd in favour of native macOS FUSE
+    ### alternatives (Mounty, FUSE-T) and frequently fails to install on new
+    ### macOS releases because of kernel-extension restrictions.
     logg 'Installing base Homebrew casks sequentially'
-    for CASK in docker-desktop macfuse; do
+    for CASK in docker-desktop; do
       brewInstallSafely cask "$CASK"
     done
 
-    ### Install java@beta only if no Java runtime is present already.
+    ### Install a stable JDK only if no Java runtime is present already.
+    ### java@beta was replaced with Eclipse Temurin LTS — Temurin is stable,
+    ### TCK-certified, and far less likely to break the install on the
+    ### current macOS than the rolling beta JDK cask.
     if ! /usr/libexec/java_home --failfast > /dev/null 2>&1; then
-      brewInstallSafely cask java@beta
+      brewInstallSafely cask temurin
     else
-      gum log -sl info 'A Java runtime is already installed; skipping cask java@beta'
+      gum log -sl info 'A Java runtime is already installed; skipping cask temurin'
     fi
 
     if [ -n "$INSTALL_FAILED" ]; then

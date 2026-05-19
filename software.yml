@@ -1403,7 +1403,7 @@ softwarePackages:
     _docs: https://app.nofwl.com/docs/chatgpt/config
     _app: NoFWL.app
     _deprecated: Deprecated in favor of the official ChatGPT application
-    cask: lencx/nofwl/nofwl --no-quarantine
+    cask: lencx/nofwl/nofwl
     apt: https://github.com/lencx/nofwl/releases/download/v0.1.0/NoFWL_0.1.0_linux_x86_64.deb
     appimage: lencx/nofwl
     msi: https://github.com/lencx/nofwl/releases/download/v0.1.0/NoFWL_0.1.0_windows_x86_64.msi
@@ -3503,11 +3503,9 @@ softwarePackages:
   fuse:
     _name: Fuse
     _short: libfuse is a library for writing filesystems in userspace on Unix-like operating systems.
-    _desc: '[macFUSE](https://osxfuse.github.io/) allows you to extend macOS via third party file systems.'
+    _desc: 'libfuse on Linux; on macOS use [FUSE-T](https://www.fuse-t.org/) or [Mounty](https://mounty.app/) — macFUSE was dropped because it depends on kernel extensions Apple is phasing out and consistently breaks on new macOS releases.'
     _github: https://github.com/libfuse/libfuse
     _bin: null
-    _when:cask: '! test -d /usr/local/Caskroom/macfuse && ! test -d "$HOMEBREW_PREFIX/Caskroom/macfuse"'
-    cask: macfuse
     apt:
     - fuse
     - libfuse-dev

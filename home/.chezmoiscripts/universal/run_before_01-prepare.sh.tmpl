@@ -66,36 +66,84 @@ printFullDiskAccessNotice() {
 #
 #     * [Detecting Full Disk Access permission on macOS](https://www.dzombak.com/blog/2021/11/macOS-Scripting-How-to-tell-if-the-Terminal-app-has-Full-Disk-Access.html)
 ensureFullDiskAccess() {
-  if [ -d /Applications ] && [ -d /System ]; then
-    if ! plutil -lint /Library/Preferences/com.apple.TimeMachine.plist > /dev/null ; then
-      if [ -n "$HEADLESS_INSTALL" ]; then
-        gum log -sl warn 'Full disk access not available. Some macOS operations may fail in headless mode.'
-        return 0
-      fi
-      printFullDiskAccessNotice
-      logg star 'Opening Full Disk Access preference pane.. Grant full-disk access for the terminal you would like to run the provisioning process with.' && open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
-      gum log -sl info 'You may have to force quit the terminal and have it reload.'
-      if [ ! -f "$HOME/.zshrc" ] || ! grep -q '# TEMPORARY FOR INSTALL DOCTOR MACOS' "$HOME/.zshrc"; then
-        echo 'bash <(curl -sSL https://install.doctor/start) # TEMPORARY FOR INSTALL DOCTOR MACOS' >> "$HOME/.zshrc"
-      fi
-      exit 0
-    else
-      gum log -sl info 'Current terminal has full disk access'
-      if [ -f "$HOME/.zshrc" ]; then
-        if command -v gsed > /dev/null; then
-          gsed -i '/# TEMPORARY FOR INSTALL DOCTOR MACOS/d' "$HOME/.zshrc" || gum log -sl warn "Failed to remove kickstart script from .zshrc"
-        else
-          if [ -d /Applications ] && [ -d /System ]; then
-            ### macOS
-            sed -i '' '/# TEMPORARY FOR INSTALL DOCTOR MACOS/d' "$HOME/.zshrc" || gum log -sl warn "Failed to remove kickstart script from .zshrc"
-          else
-            ### Linux
-            sed -i '/# TEMPORARY FOR INSTALL DOCTOR MACOS/d' "$HOME/.zshrc" || gum log -sl warn "Failed to remove kickstart script from .zshrc"
-          fi
-        fi
-      fi
-    fi
+  if [ ! -d /Applications ] || [ ! -d /System ]; then
+    return 0
   fi
+
+  ### Helper: read a TCC-protected file. If the read succeeds the calling
+  ### process has Full Disk Access. com.apple.TimeMachine.plist is in
+  ### /Library/Preferences which is only readable with FDA on macOS 10.15+.
+  _idHasFda() { plutil -lint /Library/Preferences/com.apple.TimeMachine.plist > /dev/null 2>&1; }
+
+  ### Helper: idempotently clear the kickstart-on-next-login line in
+  ### ~/.zshrc that older versions of this script left behind for users
+  ### who had to manually restart their terminal after granting FDA.
+  ### Polling-until-granted means a restart is no longer required.
+  _idClearKickstartLine() {
+    [ -f "$HOME/.zshrc" ] || return 0
+    if command -v gsed > /dev/null; then
+      gsed -i '/# TEMPORARY FOR INSTALL DOCTOR MACOS/d' "$HOME/.zshrc" 2>/dev/null || true
+    else
+      sed -i '' '/# TEMPORARY FOR INSTALL DOCTOR MACOS/d' "$HOME/.zshrc" 2>/dev/null || true
+    fi
+  }
+
+  if _idHasFda; then
+    gum log -sl info 'Current terminal has full disk access'
+    _idClearKickstartLine
+    return 0
+  fi
+
+  ### FDA is missing. Headless run: warn and keep going (downstream
+  ### plutil/defaults calls will silently no-op on protected files).
+  if [ -n "${HEADLESS_INSTALL:-}" ]; then
+    gum log -sl warn 'Full disk access not available. Some macOS operations may fail in headless mode.'
+    return 0
+  fi
+
+  ### Interactive run: open the Privacy & Security → Full Disk Access pane
+  ### and poll in-place until the user toggles their terminal on. macOS TCC
+  ### grants take effect immediately for the running process — no restart
+  ### required — so we just re-test `_idHasFda` every 2 s for up to
+  ### `FDA_TIMEOUT_SECS` (default 600 s). If the user never grants it we
+  ### fall back to a warning + continue, matching headless behaviour.
+  printFullDiskAccessNotice
+  local TERMINAL_APP
+  TERMINAL_APP="${TERM_PROGRAM:-Terminal.app}"
+  logg star "Opening System Settings → Privacy & Security → Full Disk Access. Grant access to '$TERMINAL_APP' (and any parent terminal), then come back here — we'll detect the change automatically."
+  ### `x-apple.systempreferences:` URL handler works on macOS 13+ (System
+  ### Settings) and macOS 11/12 (System Preferences) alike — both apps
+  ### accept the same anchor.
+  open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" 2>/dev/null || true
+
+  local FDA_TIMEOUT_SECS="${FDA_TIMEOUT_SECS:-600}"
+  local FDA_POLL_INTERVAL="${FDA_POLL_INTERVAL:-2}"
+  local WAITED=0
+  local SPINNER_PID=""
+  if command -v gum > /dev/null; then
+    ### gum spin gives a live "waiting" line while we poll. Run it in the
+    ### background so we can kill it the instant FDA flips on.
+    ( gum spin --spinner dot --title "Waiting up to ${FDA_TIMEOUT_SECS}s for Full Disk Access…" --show-output -- sleep "$FDA_TIMEOUT_SECS" ) &
+    SPINNER_PID=$!
+  fi
+  trap '[ -n "$SPINNER_PID" ] && kill "$SPINNER_PID" 2>/dev/null || true' RETURN INT
+
+  while [ "$WAITED" -lt "$FDA_TIMEOUT_SECS" ]; do
+    if _idHasFda; then
+      [ -n "$SPINNER_PID" ] && kill "$SPINNER_PID" 2>/dev/null || true
+      SPINNER_PID=""
+      gum log -sl info "Full disk access granted after ${WAITED}s — continuing without restart"
+      _idClearKickstartLine
+      return 0
+    fi
+    sleep "$FDA_POLL_INTERVAL"
+    WAITED=$((WAITED + FDA_POLL_INTERVAL))
+  done
+
+  [ -n "$SPINNER_PID" ] && kill "$SPINNER_PID" 2>/dev/null || true
+  SPINNER_PID=""
+  gum log -sl warn "Timed out after ${FDA_TIMEOUT_SECS}s waiting for Full Disk Access. Continuing — some macOS preference writes will silently no-op until FDA is granted. Re-run the provisioner after granting access to apply those steps."
+  return 0
 }
 
 # @description Install the mobileconfig files from `~/.config/macos/mobileconfig`.

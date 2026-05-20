@@ -430,8 +430,18 @@ fi
 [ ! -f "$HOMEBREW_PREFIX/share/google-cloud-sdk/path.zsh.inc" ] || source "$HOMEBREW_PREFIX/share/google-cloud-sdk/path.zsh.inc"
 [ ! -f "$HOMEBREW_PREFIX/share/google-cloud-sdk/completion.zsh.inc" ] || source "$HOMEBREW_PREFIX/share/google-cloud-sdk/completion.zsh.inc"
 
-### Goto
-[ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/shell/goto.sh" ] || source "${XDG_CONFIG_HOME:-$HOME/.config}/shell/goto.sh"
+### Goto — oh-my-zsh + several common dotfile templates ship an `alias goto=…`
+### so we must `unalias` before sourcing goto.sh, otherwise zsh prints
+### `defining function based on alias `goto`` and the function never installs.
+### `setopt aliases` is also flipped off for the source so positional aliases
+### in the script body don't get re-expanded mid-parse.
+### Cf. https://zsh.sourceforge.io/Doc/Release/Shell-Builtin-Commands.html#index-unalias
+if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/shell/goto.sh" ]; then
+  unalias goto 2>/dev/null
+  builtin setopt no_aliases 2>/dev/null
+  source "${XDG_CONFIG_HOME:-$HOME/.config}/shell/goto.sh"
+  builtin setopt aliases 2>/dev/null
+fi
 
 ### hiSHtory
 # Hishtory Config:

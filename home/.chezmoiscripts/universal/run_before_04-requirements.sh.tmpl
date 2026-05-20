@@ -134,8 +134,14 @@ if [ -d /Applications ] && [ -d /System ]; then
     ### macfuse was dropped: it is EOL'd in favour of native macOS FUSE
     ### alternatives (Mounty, FUSE-T) and frequently fails to install on new
     ### macOS releases because of kernel-extension restrictions.
+    ###
+    ### font-meslo-lg-nerd-font: powerlevel10k's recommended font.
+    ### Installing it here (not lazily later) so Terminal.app's default
+    ### profile can be pointed at it during the same provisioning run —
+    ### otherwise the first terminal launch renders the powerline glyphs as
+    ### tofu and the user thinks the prompt is broken.
     logg 'Installing base Homebrew casks sequentially'
-    for CASK in docker-desktop; do
+    for CASK in docker-desktop font-meslo-lg-nerd-font; do
       brewInstallSafely cask "$CASK"
     done
 

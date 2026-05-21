@@ -37,17 +37,24 @@ extras:
         keep-yearly: 1
 
 locations:
+{{/*
+  chezmoi templates use Go's text/template engine which does NOT expose
+  Hugo's `.Files.Glob` / `.Files.Get` / `.Yaml.Get` namespaces. Use the
+  native `glob` function (Sprig) instead, and `fromYaml` to parse the
+  matched files. We rely on chezmoi 2.40+ functions; older versions of
+  this template emitted `map has no entry for key "Files"` on every
+  apply.
+
+  The block discovers /healthchecks_config/ volumes across every
+  docker-stack.yml under ~/.config/docker/templates and emits a
+  location entry per matched volume.
+*/}}
 {{- $configDir := env "XDG_CONFIG_HOME" | default (env "HOME") | printf "%s/.config/docker/templates" }}
-{{- $folders := .Files.Glob $configDir "*/docker-stack.yml" }}
-
-{{- if eq (len $folders) 1 }}
-  {{- $folder := index $folders 0 }}
-  {{- $yml := .Files.Get $folder }}
-  {{- $volumes := .Yaml.Get $yml "volumes" }}
-
-  {{- range $volume := $volumes }}
-    {{- $name := .Yaml.Get $volume "name" }}
-
+{{- $folders := glob (printf "%s/*/docker-stack.yml" $configDir) }}
+{{- range $folder := $folders }}
+  {{- $stack := include $folder | fromYaml }}
+  {{- $volumes := default (dict) (index $stack "volumes") }}
+  {{- range $name, $cfg := $volumes }}
     {{- if eq $name "healthchecks_config" }}
   {{ $name }}:
     from: {{ $name }}

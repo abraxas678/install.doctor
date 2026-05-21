@@ -63,14 +63,27 @@ extras:
         keep-yearly: 2
 
 locations:
-  {{- $softwarePath := (or (env "XDG_DATA_HOME") (printf "%s/.local/share" (env "HOME"))) | printf "%s/chezmoi/software.yml" -}}
-  {{- $softwareData := .chezmoi.sourceDir | printf "%s/software.yml" | include | fromYaml -}}
+  {{/*
+    .chezmoi.sourceDir points at the `home/` subfolder, but
+    software.yml lives one level up at the chezmoi repo root —
+    `.chezmoi.sourceDir/../software.yml`. The previous template
+    pointed at `{sourceDir}/software.yml` which 404'd on every
+    apply ("no such file or directory: …/home/software.yml").
+  */}}
+  {{- $softwareYml := joinPath .chezmoi.sourceDir ".." "software.yml" -}}
+  {{- $softwareData := include $softwareYml | fromYaml -}}
 
+  {{- /*
+    `$.env` does NOT exist in chezmoi's template namespace — that's a Hugo
+    leftover. Use the `env` function with a variable arg so we can check
+    each `<KEY>_APPDATA` env var for a non-empty value.
+  */ -}}
   {{- range $key, $value := $softwareData.softwarePackages -}}
     {{- $envKey := printf "%s_APPDATA" (upper $key) -}}
-    {{- if and (index $value "_env") (index $.env $envKey) -}}
+    {{- $envVal := env $envKey -}}
+    {{- if and (index $value "_env") (ne $envVal "") -}}
   {{- $key }}:
-    from: "{{ default "" (env $envKey) }}"
+    from: "{{ $envVal }}"
     <<: *app
     {{- end -}}
   {{- end }}

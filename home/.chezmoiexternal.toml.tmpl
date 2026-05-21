@@ -65,9 +65,11 @@
 [".local/share/ansible/plugins/callback/beautiful_output.py"]
     type = "file"
     url = "https://github.com/Townk/ansible-beautiful-output/raw/master/callback_plugins/beautiful_output.py"
-[".local/share/ansible/plugins/lookup/bitwarden.py"]
-    type = "file"
-    url = "https://github.com/ProfessorManhattan/ansible-modules-bitwarden/raw/master/lookup_plugins/bitwarden.py"
+# Removed: ProfessorManhattan/ansible-modules-bitwarden was deleted from
+# GitHub (now 404s on every chezmoi apply). For Ansible Bitwarden lookups,
+# install the maintained collection instead:
+#   ansible-galaxy collection install community.general
+# Then use community.general.bitwarden in your playbooks.
 
 # https://github.com/kholia/OSX-KVM
 [".local/share/osx-kvm"]

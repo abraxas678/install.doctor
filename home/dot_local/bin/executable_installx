@@ -451,8 +451,21 @@ async function installPackages(pkgInstructions) {
         log(`Unable to find install key instructions for ${key}`)
     }
   }
-  log(`Performing ${promises.length} installations`)
-  const installs = await Promise.allSettled(promises)
+  ### Throttle parallelism. Bulk-running `Promise.allSettled(promises)` on
+  ### a fresh box spawns 20+ concurrent `brew install --cask` workers, each
+  ### with its own curl. 20 curls on a single home connection saturates the
+  ### shared pipe and slows every download — and brew's own per-process
+  ### locks/cache mean only one cask actually installs at a time anyway.
+  ### CONCURRENCY=4 (override via env) lets 4 downloads run in parallel,
+  ### which empirically finishes the bundle 2-3× faster end-to-end.
+  const CONCURRENCY = parseInt(process.env.INSTALLX_CONCURRENCY || '4', 10) || 4
+  log(`Performing ${promises.length} installations (concurrency=${CONCURRENCY})`)
+  const installs = []
+  for (let i = 0; i < promises.length; i += CONCURRENCY) {
+    const slice = promises.slice(i, i + CONCURRENCY)
+    const settled = await Promise.allSettled(slice)
+    installs.push(...settled)
+  }
   log(`All of the installations have finished`)
   process.env.DEBUG && console.log('Completed installs:', installs)
   await postInstall(combined)

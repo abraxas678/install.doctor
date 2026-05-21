@@ -100,7 +100,6 @@ softwarePackages:
     krew:
       - ctx
       - ns
-    nix: emplace
     npm: altair
     pacman: altair
     pipx: altair

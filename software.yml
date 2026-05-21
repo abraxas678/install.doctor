@@ -124,7 +124,6 @@ softwarePackages:
     choco: act-cli
     port: act
     scoop: act
-    nix: nixpkgs.act
     yay: act
     go: github.com/nektos/act@
   adobe-creative-cloud:
@@ -1268,7 +1267,6 @@ softwarePackages:
     pacman: carapace-bin
     scoop: extras/carapace-bin
     winget: rsteube.Carapace
-    nix-shell: carapace
   carbon-now:
     _name: Carbon
     _short: Carbon is a tool that allows you to create and share beautiful images of your source code snippets.
@@ -1379,7 +1377,6 @@ softwarePackages:
     brew: charmbracelet/tap/charm
     pacman: charm
     go: github.com/charmbracelet/charm@main
-    nix-env: nixpkgs.charm
   chatgpt:
     _name: ChatGPT Official Desktop Application
     _desc: Official ChatGPT application for desktop for macOS and fallbacks for ChatGPT desktop on other platforms
@@ -1417,7 +1414,6 @@ softwarePackages:
     _docs: https://github.com/cheat/cheat
     brew: cheat
     snap: cheat
-    nix: nixos.cheat
     yay: cheat
     go: github.com/cheat/cheat/cmd/cheat@latest
     _docker: docker run --rm bannmann/docker-cheat
@@ -1446,7 +1442,6 @@ softwarePackages:
     pacman: chezmoi
     choco: chezmoi
     snap: chezmoi --classic
-    nix: chezmoi
     pkg: chezmoi
     apk: chezmoi
     xbps: chezmoi
@@ -1573,7 +1568,6 @@ softwarePackages:
     yay: clipboard
     apk: clipboard
     emerge: app-misc/clipboard
-    nix-env: nixpkgs.clipboard-jh
     xbps: clipboard
   cloc:
     _name: Cloc
@@ -1735,7 +1729,6 @@ softwarePackages:
     _bin: code2prompt
     cargo: code2prompt
     yay: code2prompt
-    nix-env: nixpkgs.code2prompt
   codeclimate:
     _name: CodeClimate
     _short: CodeClimate is a platform for automated code review and quality analysis.
@@ -1930,7 +1923,6 @@ softwarePackages:
     brew: charmbracelet/tap/crush
     npm: '@charmland/crush'
     winget: charmbracelet.crush
-    nix: github:numtide/nix-ai-tools#crush
     yay: crush-bin
   cryptomator:
     _name: 'Cryptomator                                                                                                                                                                                               '
@@ -2164,7 +2156,6 @@ softwarePackages:
     choco: deno
     scoop: deno
     cargo: deno
-    nix: deno
   desed:
     _name: desed
     _short: desed is a tool for debugging and exploring sed commands interactively.
@@ -2724,7 +2715,6 @@ softwarePackages:
     _docs: https://github.com/tversteeg/emplace
     scoop: emplace
     cargo: emplace
-    nix: emplace
   empty-trash:
     _name: Empty Trash CLI
     _short: empty-trash-cli is a command-line tool for emptying the trash on macOS.
@@ -2793,7 +2783,6 @@ softwarePackages:
     brew: envio-cli/tap/envio
     cargo: envio
     yay: envio
-    nix-env: envio
   eslint:
     _name: ESLint
     _short: ESLint is a popular JavaScript linting tool that helps developers maintain code quality and adhere to coding standards.
@@ -2900,7 +2889,6 @@ softwarePackages:
     dnf: exa
     pacman: exa
     cargo: exa
-    nix: exa
     _notes: exa was available as a Homebrew package but has been disabled because the Homebrew team flagged the upstream project as outdated. Re-add the brew option when the formula is again available.
     emerge: sys-apps/exa
     zypper: exa
@@ -2945,7 +2933,6 @@ softwarePackages:
     cargo: eza
     winget: eza-community.eza
     emerge: sys-apps/eza
-    nix-env: eza
     xbps-install: eza
   fabric:
     _name: Fabric
@@ -3003,7 +2990,6 @@ softwarePackages:
     _preload: true
     brew: fcp
     cargo: fcp
-    nix: unstable.fcp
   fd:
     _name: fd
     _short: fd is a simple, fast and user-friendly alternative to find command, written in Rust.
@@ -3245,7 +3231,6 @@ softwarePackages:
     _docs: https://fission.io/docs/
     github: github.com/fission/fission
     exe: https://github.com/fission/fission/releases/download/v1.19.0/fission-v1.19.0-windows-amd64.exe
-    nix-env: nixos.fission
     script:darwin: cd /tmp && curl -sSLo fission https://github.com/fission/fission/releases/download/v1.19.0/fission-v1.19.0-darwin-amd64 && chmod +x fission && sudo mv fission /usr/local/bin/
     script:linux: cd /tmp && curl -sSLo fission https://github.com/fission/fission/releases/download/v1.19.0/fission-v1.19.0-linux-amd64 && chmod +x fission && sudo mv fission /usr/local/bin/
   fixkey:
@@ -3291,7 +3276,6 @@ softwarePackages:
     scoop: flameshot
     snap: flameshot
     winget: flameshot
-    nix: nixos.flameshot
     _scoopExtras: true
     eopkg: flameshot
     xbps: flameshot
@@ -3538,7 +3522,6 @@ softwarePackages:
     pacman: fzf
     port: fzf
     pkg-freebsd: fzf
-    nix: nixpkgs.fzf
     apk: fzf
     pkg_add: fzf
     pkgin: fzf
@@ -3970,7 +3953,6 @@ softwarePackages:
     scoop: gitui
     cargo: gitui
     winget: gitui
-    nix: nixpkgs.gitui
     pkg: gitui
   gixy:
     _name: 'gixy                                                                                                                                                                                                      '
@@ -4395,7 +4377,6 @@ softwarePackages:
     snap: goreleaser --classic
     yay: goreleaser-bin
     go: github.com/goreleaser/goreleaser@latest
-    nix-env: goreleaser
   gotests:
     _name: 'gotests                                                                                                                                                                                                   '
     _short: gotests is a tool that generates Go tests from your source code.
@@ -4538,7 +4519,6 @@ softwarePackages:
     _preload: true
     brew: gum
     pacman: gum
-    nix: nixpkgs.gum
     go: github.com/charmbracelet/gum@latest
     apk: gum
     pkg-termux: gum
@@ -4697,7 +4677,6 @@ softwarePackages:
     pkg-freebsd: hexyl
     scoop: hexyl
     cargo: hexyl
-    nix: hexyl
     github: github.com/sharkdp/hexyl
     pkg-termux: hexyl
     xbps: hexyl
@@ -4751,7 +4730,6 @@ softwarePackages:
     pacman: hoard
     port: hoard-cli
     cargo: hoard-rs
-    nix-env: hoard
   holehe:
     _name: Holehe
     _short: holehe is a tool for identifying and exploiting known and existing vulnerabilities in web applications.
@@ -4815,7 +4793,6 @@ softwarePackages:
     pkg-freebsd: hstr
     apk: hstr
     emerge: app-shells/hstr
-    nix-env: hstr
     xbps: hstr
   htmlhint:
     _name: HTMLHint
@@ -5177,7 +5154,6 @@ softwarePackages:
     port: ipfs
     scoop: go-ipfs
     snap: ipfs
-    nix: ipfs
   ipfs-deploy:
     _name: IPFS
     _short: IPFS is a peer-to-peer hypermedia protocol designed to create a content-addressable, peer-to-peer method of storing and sharing hypermedia in a distributed file system.
@@ -5313,7 +5289,6 @@ softwarePackages:
     dnf: jc
     pacman: jc
     pipx: jc
-    nix-env: nixpkgs.jc
     zypper: jc
   jenv:
     _name: jenv
@@ -5477,7 +5452,6 @@ softwarePackages:
     winget: Casey.Just
     apk: just
     eopkg: just
-    nix-env: nixpkgs.just
     xbps: just
   k9s:
     _name: K9s
@@ -5869,7 +5843,6 @@ softwarePackages:
       LAPCE_APPDATA:
         cask: $HOME/Library/Application Support/dev.lapce.Lapce-Stable
     emerge: app-editors/lapce
-    nix-env: nixpkgs.lapce
   lazygit:
     _name: 'lazygit                                                                                                                                                                                                   '
     _short: lazygit is a terminal-based GUI for Git with a simple interface for managing repositories.
@@ -6745,7 +6718,6 @@ softwarePackages:
     port: port
     cargo: mise-cli
     apk: mise
-    nix-env: mise
   mitmproxy:
     _name: mitmproxy
     _short: mitmproxy is an open-source interactive HTTPS proxy.
@@ -7177,7 +7149,6 @@ softwarePackages:
     cargo: navi
     _repology: navi
     emerge: app-misc/navi
-    nix-env: nixpkgs.navi
   nb:
     _name: nb
     _short: nb is a command-line note-taking, bookmarking, and knowledge base application for developers.
@@ -7251,7 +7222,6 @@ softwarePackages:
     - ncurses
     - neofetch
     eopkg: neofetch
-    nix-env: neofetch
     pkg-termux: neofetch
     xbps: neofetch
     zypper: neofetch
@@ -7295,7 +7265,6 @@ softwarePackages:
     choco: neovim
     port: neovim
     winget: Neovim.Neovim
-    nix: neovim
     pkg:
     - neovim
     - py27-pynvim
@@ -8075,7 +8044,6 @@ softwarePackages:
     - rsvg-convert
     - miktex
     winget: pandoc
-    nix: pandoc
     _deps:darwin:
     - basictex
     - python
@@ -8139,7 +8107,6 @@ softwarePackages:
     - pay-respects-module-runtime-rules
     - pay-respects-module-request-ai
     _brew: timescam/homebrew-tap/pay-respects
-    nix-env: nixos.pay-respects
   pb:
     _name: Pushbullet for Desktop
     _short: pb-for-desktop is a simple clipboard manager for MacOS.
@@ -9464,7 +9431,6 @@ softwarePackages:
     port: restic
     pkg-freebsd: restic
     scoop: restic
-    nix: restic
     apk: restic
     eopkg: restic
     pkg_add: restic
@@ -9493,7 +9459,6 @@ softwarePackages:
     port: ripgrep
     scoop: ripgrep
     cargo: ripgrep
-    nix: ripgrep
     pkg: ripgrep
     zypper: ripgrep
   ripgrep-all:
@@ -9511,7 +9476,6 @@ softwarePackages:
     - tesseract
     pacman: ripgrep-all
     choco: ripgrep-all
-    nix: ripgrep-all
   rivet:
     _name: Rivet
     _github: https://github.com/Ironclad/rivet
@@ -10115,7 +10079,6 @@ softwarePackages:
     pkg-freebsd: shellcheck
     scoop: shellcheck
     snap: shellcheck
-    nix: nixpkgs.shellcheck
     _docker: docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:stable
     cabal: shellcheck
     emerge: shellcheck
@@ -10229,7 +10192,6 @@ softwarePackages:
     _bin: skate
     brew: charmbracelet/tap/skate
     pacman: skate
-    nix: nixpkgs.skate
     go: github.com/charmbracelet/skate@latest
   skhd:
     _name: skhd
@@ -10299,7 +10261,6 @@ softwarePackages:
     snap: slides
     yay: slides
     go: github.com/maaslalani/slides@latest
-    nix-env: nixpkgs.slides
   sloth:
     _name: Sloth
     _short: Sloth is a macOS tool that shows all open files and sockets in use by all running processes on your system.
@@ -10368,7 +10329,6 @@ softwarePackages:
     brew: charmbracelet/tap/soft-serve
     pacman: soft-serve
     go: github.com/charmbracelet/soft-serve/cmd/soft@latest
-    nix-env: nixpkgs.soft-serve
   solargraph:
     _name: Solargraph
     _short: Solargraph is a Ruby language server that provides intellisense, code completion, and other IDE features for Ruby development.
@@ -10548,8 +10508,6 @@ softwarePackages:
     pipx: sshuttle
     port: sshuttle
     emerge: net-proxy/sshuttle
-    nix-env: nixos.sshuttle
-    nix-pkg: nixpkgs.sshuttle
     zypper: sshuttle
   ssl-proxy:
     _name: ssl-proxy
@@ -10858,7 +10816,6 @@ softwarePackages:
     _docs: https://github.com/joehillen/sysz
     pacman: sysz
     bin: https://github.com/joehillen/sysz
-    nix-env: nixpkgs.sysz
     script:linux: cd /tmp && git clone https://github.com/joehillen/sysz.git && cd sysz && sudo make install && cd /tmp && rm -rf sysz
   t:
     _name: 't                                                                                                                                                                                                         '
@@ -10976,7 +10933,6 @@ softwarePackages:
     pacman: task
     port: task
     emerge: task
-    nix-env: taskwarrior
     sbopkg: task
     xbps: task
     zypper: taskwarrior
@@ -11166,7 +11122,6 @@ softwarePackages:
     _bin: tig
     _home: https://jonas.github.io/tig/
     brew: tig
-    nix: tig
     pkg: tig
   tigervnc:
     _name: TigerVNC Server
@@ -11213,7 +11168,6 @@ softwarePackages:
     dnf: timew
     pacman: timew
     emerge: app-misc/timew
-    nix-env: timewarrior
   tinypng:
     _name: tinypng
     _short: tinypng-cli is a command-line interface for compressing images using the TinyPNG service.
@@ -11728,7 +11682,6 @@ softwarePackages:
     port: vhs
     scoop: vhs
     go: github.com/charmbracelet/vhs@latest
-    nix-env: nixpkgs.vhs
     xbps: vhs
   vidmerger:
     _name: VidMerger
@@ -11904,7 +11857,6 @@ softwarePackages:
     scoop: vscodium
     snap: codium --classic
     winget: vscodium
-    nix: nixpkgs.vscodium
     yay: vscodium-bin
     appimage: vscodium/vscodium
   vup:
@@ -11988,7 +11940,6 @@ softwarePackages:
     choco: watchexec
     scoop: watchexec
     cargo: watchexec-cli
-    nix: watchexec
     apk: watchexec
     baulk: watchexec
     emerge: watchexec
@@ -12211,7 +12162,6 @@ softwarePackages:
     dnf: wireguard-tools
     pacman: wireguard-tools
     port: wireguard-tools
-    nix: nixpkgs.wireguard-tools
     apk: wireguard-tools
     emerge: wireguard-tools
     opkg: wireguard
@@ -12252,7 +12202,6 @@ softwarePackages:
     brew: charmbracelet/tap/wishlist
     scoop: wishlist
     yay: wishlist-bin
-    nix-env: nixpkgs.wishlist
   wkhtmltopdf:
     _name: wkhtmltopdf
     _short: wkhtmltopdf is a command line tool to convert HTML to PDF using WebKit rendering engine.
@@ -12419,7 +12368,6 @@ softwarePackages:
     scoop: xh
     cargo: xh
     apk: xh
-    nix-env: nixpkgs.xh
     pkg-android: xh
   xhyve:
     _name: xhyve
@@ -12492,7 +12440,6 @@ softwarePackages:
     brew: xsv
     port: xsv
     cargo: xsv
-    nix-env: xsv
   xurls:
     _name: xurls
     _short: xurls is a Go library for extracting URLs from text.
@@ -12551,7 +12498,6 @@ softwarePackages:
     port: yank
     pkg-freebsd: yank
     scoop: win32yank
-    nix: yank
     _bin:apt: yank-cli
     pkg_add: yank
     zypper: yank
@@ -12597,7 +12543,6 @@ softwarePackages:
     scoop: yazi
     cargo: --locked yazi-fm yazi-cli
     winget: sxyazi.yazi
-    nixos: nixos.yazi
   yj:
     _name: YJ
     _short: yj is a command-line tool for parsing and manipulating YAML and JSON data easily.

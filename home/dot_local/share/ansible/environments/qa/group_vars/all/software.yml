@@ -27,7 +27,6 @@
 # @installoption github: github_address                                # GitHub address (e.g. github.com/altair-graphql/altair). Installation is performed using the role `githubbinary`
 # @installoption go: go_github_address                                 # Go GitHub address (e.g. github.com/nektos/act@latest)
 # @installoption pacman: package_name                                  # Package name in the official/default Archlinux compatible repositories
-# @installoption ports: package_name                                   # macOS port package name (installed via `sudo port install package_name`)
 # @installoption pkg: package_name                                     # Package name in the official/default BSD repositories. This method is listed for completeness
 # @installoption scoop: package_name                                   # Windows scoop package name (installed via `scoop install package_name`)
 # @installoption snap: package_name                                    # Package name as shown in snapcraft.io
@@ -874,7 +873,6 @@ software_package:
     cargo: --features=ssl websocat
     github: github.com/vi/websocat
     pkg: websocat
-    port: websocat
   # @binaryapp @binary @application [WebTorrent Desktop](https://github.com/webtorrent/webtorrent-desktop) - Streaming torrent app for Mac, Windows, and Linux
   webtorrent:
     brew: webtorrent

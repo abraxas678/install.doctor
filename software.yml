@@ -111,7 +111,6 @@ softwarePackages:
     dnf: ack
     pacman: ack
     choco: ack
-    port: perl/p5-app-ack
   act:
     _name: Act
     _short: act is a tool that allows you to run GitHub Actions locally.
@@ -122,7 +121,6 @@ softwarePackages:
     _docs: https://github.com/nektos/act#example-commands
     brew: act
     choco: act-cli
-    port: act
     scoop: act
     yay: act
     go: github.com/nektos/act@
@@ -334,7 +332,6 @@ softwarePackages:
     _preload: true
     brew: ansifilter
     choco: ansifilter
-    port: ansifilter
   anythingllm:
     _short: Private desktop AI chat application and eco-system
     _desc: Private desktop AI chat application and eco-system
@@ -503,7 +500,6 @@ softwarePackages:
     dnf:fedora: aria2
     pacman: aria2
     choco: aria2
-    port: aria2
     scoop: aria2
   ariang:
     _name: 'AriaNg                                                                                                                                                                                                    '
@@ -593,7 +589,6 @@ softwarePackages:
     _preload: true
     brew: atuin
     pacman: atuin
-    port: atuin
     cargo: atuin
     pkg-termux: atuin
   audacity:
@@ -713,7 +708,6 @@ softwarePackages:
     dnf:fedora: axel
     pacman: axel
     choco: axel
-    port: axel
   azure-cli:
     _name: Azure CLI
     _short: Azure CLI is a command-line tool for managing Azure resources.
@@ -824,7 +818,6 @@ softwarePackages:
     apt: bat
     pacman: bat
     choco: bat
-    port: bat
     scoop: bat
     cargo: bat
     pkg: bat
@@ -901,7 +894,6 @@ softwarePackages:
     _docs: https://rtyley.github.io/bfg-repo-cleaner/
     brew: bfg
     choco: bfg-repo-cleaner
-    port: bfg
   bin:
     _name: bin
     _short: bin is a collection of useful scripts and tools for macOS users, maintained by Marcos Nil.
@@ -1127,7 +1119,6 @@ softwarePackages:
     _home: https://dystroy.org/broot/
     _docs: https://dystroy.org/broot/documentation/usage/
     brew: broot
-    port: broot
     cargo: broot
     apk: broot
     emerge: broot
@@ -1581,7 +1572,6 @@ softwarePackages:
     pacman: cloc
     npm: cloc
     choco: cloc
-    port: cloc
     pkg-freebsd: cloc
     scoop: cloc
     apk: cloc
@@ -1774,7 +1764,6 @@ softwarePackages:
     _home: https://cointop.sh/
     _docs: https://docs.cointop.sh/
     brew: cointop
-    port: cointop
   commitizen:
     _name: commitizen
     _short: cz-cli is a command-line tool that helps in creating standardized commit messages following conventional commit message guidelines.
@@ -2016,7 +2005,6 @@ softwarePackages:
     _home: https://curlie.io/
     _docs: https://curlie.io/
     brew: curlie
-    port: curlie
     scoop: curlie
     go: github.com/rs/curlie@latest
     pkg: curlie
@@ -2323,7 +2311,6 @@ softwarePackages:
     apt: dnsmasq
     dnf: dnsmasq
     pacman: dnsmasq
-    port: dnsmasq
   docker:
     _name: Docker CLI
     _short: microsoft/docker is a GitHub repository maintained by Microsoft for Docker-related projects.
@@ -2576,7 +2563,6 @@ softwarePackages:
     brew: dua-cli
     dnf:fedora: dua-cli
     pacman: dua-cli
-    port: dua-cli
     scoop: dua
     cargo: dua-cli
     pkgin: dua-cli
@@ -2906,7 +2892,6 @@ softwarePackages:
     dnf: perl-Image-ExifTool.noarch
     pacman: perl-image-exiftool
     choco: exiftool
-    port: exiftool
     scoop: exiftool
   expect:
     _name: Expect
@@ -2917,7 +2902,6 @@ softwarePackages:
     apt: expect
     dnf: expect
     pacman: expect
-    port: expect
   eza:
     _name: Eza
     _desc: A modern replacement for ls. Active fork of exa.
@@ -2928,7 +2912,6 @@ softwarePackages:
     _preload: true
     brew: eza
     pacman: eza
-    port: eza
     scoop: eza
     cargo: eza
     winget: eza-community.eza
@@ -2956,7 +2939,6 @@ softwarePackages:
     apt: fail2ban
     dnf: fail2ban
     pacman: fail2ban
-    port: fail2ban
     _notes: 'fail2ban cannot be installed on Qubes Fedora 36 without messing with the qubes-firewall since firewalld is required.
 
       '
@@ -3272,7 +3254,6 @@ softwarePackages:
     dnf: flameshot
     pacman: flameshot
     choco: flameshot
-    port: flameshot
     scoop: flameshot
     snap: flameshot
     winget: flameshot
@@ -3520,7 +3501,6 @@ softwarePackages:
     apt: fzf
     dnf:fedora: fzf
     pacman: fzf
-    port: fzf
     pkg-freebsd: fzf
     apk: fzf
     pkg_add: fzf
@@ -3540,7 +3520,6 @@ softwarePackages:
     dnf: gawk
     pacman: gawk
     choco: gawk
-    port: gawk
     scoop: gawk
   gcc:
     _name: GCC
@@ -3553,7 +3532,6 @@ softwarePackages:
     apt: gcc
     dnf: gcc
     pacman: gcc
-    port: gcc11
   gcloud:
     _name: Google Cloud SDK
     _desc: '[Google Cloud SDK](https://cloud.google.com/sdk) includes tools and libraries for interacting with Google Cloud products and services. With it, you can orchestrate virtual machine instances directly from your command line, manage Compute Engine networks/firewalls/disks, simulate Pub/Sub locally, and much more.'
@@ -3594,7 +3572,6 @@ softwarePackages:
     _docs: https://github.com/prasmussen/gdrive#usage
     brew: gdrive
     choco: gdrive
-    port: gdrive
     scoop: gdrive
     github: github.com/prasmussen/gdrive
     yay: gdrive
@@ -3637,7 +3614,6 @@ softwarePackages:
     _preload: true
     brew: gh
     choco: gh
-    port: gh
     scoop: gh
     winget: GitHub.cli
   ghcup:
@@ -3669,7 +3645,6 @@ softwarePackages:
     dnf: gifsicle
     pacman: gifsicle
     choco: gifsicle
-    port: gifsicle
     scoop: gifsicle
   gimp:
     _name: GIMP
@@ -3718,7 +3693,6 @@ softwarePackages:
       '
     brew: git-branchless
     pacman: git-branchless
-    port: git-branchless
     scoop: git-branchless
     cargo: git-branchless
     apk: git-branchless
@@ -3890,7 +3864,6 @@ softwarePackages:
     brew: gitlab-runner
     pacman: gitlab-runner
     choco: gitlab-runner
-    port: gitlab-runner
     scoop: gitlab-runner
   gitlabform:
     _name: 'gitlabform                                                                                                                                                                                                '
@@ -3949,7 +3922,6 @@ softwarePackages:
     dnf:fedora: gitui
     pacman: gitui
     choco: delta
-    port: gitui
     scoop: gitui
     cargo: gitui
     winget: gitui
@@ -3992,7 +3964,6 @@ softwarePackages:
     - lm_sensors
     - wireless_tools
     pipx: glances
-    port: glances
     _post:pipx: pipx inject glances glances[all]
     apt:ubuntu:
     - python3-dev
@@ -4204,7 +4175,6 @@ softwarePackages:
     apt: golang-go
     pacman: go
     choco: golang
-    port: go
     scoop: go
     snap: go --classic
   go-chromecast:
@@ -4274,7 +4244,6 @@ softwarePackages:
     _preload: true
     brew: gomplate
     choco: gomplate
-    port: gomplate
     _docker: docker run hairyhenderson/gomplate:stable
     apk: gomplate
   goofys:
@@ -4424,7 +4393,6 @@ softwarePackages:
     _docs: https://docs.gradle.org/current/userguide/userguide.html
     brew: gradle
     choco: gradle
-    port: gradle
     scoop: gradle
     snap: gradle --classic
   graphql-playground:
@@ -4480,7 +4448,6 @@ softwarePackages:
     _docs: https://github.com/anchore/grype#getting-started
     brew: anchore/grype/grype
     choco: grype
-    port: grype
     yay: grype-bin
   gtop:
     _name: 'gtop                                                                                                                                                                                                      '
@@ -4673,7 +4640,6 @@ softwarePackages:
     apt: hexyl
     dnf:fedora: hexyl
     pacman: hexyl
-    port: hexyl
     pkg-freebsd: hexyl
     scoop: hexyl
     cargo: hexyl
@@ -4728,7 +4694,6 @@ softwarePackages:
     _bin: hoard
     _preload: true
     pacman: hoard
-    port: hoard-cli
     cargo: hoard-rs
   holehe:
     _name: Holehe
@@ -4778,7 +4743,6 @@ softwarePackages:
     _github: https://github.com/six-ddc/hss
     _bin: hss
     brew: hss
-    port: hss
     script: cd /tmp && git clone https://github.com/six-ddc/hss.git && cd hss && make && make install && cd /tmp && rm -rf hss
   hstr:
     _name: HiSToRy
@@ -4789,7 +4753,6 @@ softwarePackages:
     brew: hstr
     apt: hstr
     dnf: hstr
-    port: histr
     pkg-freebsd: hstr
     apk: hstr
     emerge: app-shells/hstr
@@ -4826,7 +4789,6 @@ softwarePackages:
     apt: htop
     dnf: htop
     pacman: htop
-    port: htop
   httm:
     _name: httm
     _github: https://github.com/kimono-koans/httm
@@ -4864,7 +4826,6 @@ softwarePackages:
     pacman: httpie
     pipx: httpie
     choco: httpie
-    port: httpie
     snap: httpie
   httpstat:
     _name: httpstat
@@ -4903,7 +4864,6 @@ softwarePackages:
     dnf: hugo
     pacman: hugo
     choco: hugo
-    port: hugo
     scoop: main/hugo
     snap: hugo
     go: github.com/gohugoio/hugo@latest
@@ -4918,7 +4878,6 @@ softwarePackages:
     brew: hurl
     npm: '@orangeopensource/hurl'
     choco: hurl
-    port: hurl
     pkg-freebsd: hurl
     scoop: hurl
     cargo: hurl
@@ -5151,7 +5110,6 @@ softwarePackages:
       sudo: false
     brew: ipfs
     choco: go-ifps
-    port: ipfs
     scoop: go-ipfs
     snap: ipfs
   ipfs-deploy:
@@ -5218,7 +5176,6 @@ softwarePackages:
     apt: irssi
     dnf: irssi
     pacman: irssi
-    port: irssi
   is-up:
     _name: 'is-up-cli                                                                                                                                                                                                 '
     _short: is-up-cli is a command-line interface (CLI) tool created by Sindre Sorhus to check if a website is up or down.
@@ -5276,7 +5233,6 @@ softwarePackages:
     dnf: java-11-openjdk-devel.x86_64
     pacman: jdk-openjdk
     choco: jdk11
-    port: openjdk11
     scoop: openjdk11
   jc:
     _name: jc
@@ -5392,7 +5348,6 @@ softwarePackages:
     _home: https://github.com/noahgorstein/jqp
     _docs: https://github.com/noahgorstein/jqp#usage
     brew: noahgorstein/tap/jqp
-    port: jqp
     yay: jqp
   json-server:
     _name: JSON Server
@@ -5444,7 +5399,6 @@ softwarePackages:
     dnf: just
     pacman: just
     choco: just
-    port: just
     pkg-freebsd: just
     scoop: just
     snap: --edge --classic just
@@ -5462,7 +5416,6 @@ softwarePackages:
     brew: derailed/k9s/k9s
     pacman: k9s
     choco: k9s
-    port: k9s
     scoop: k9s
   kap:
     _name: Kap
@@ -5670,7 +5623,6 @@ softwarePackages:
     choco:
     - kubens
     - kubectx
-    port: kubectx
     snap: kubectx --classic
   kubekey:
     _name: KubeKey
@@ -5732,7 +5684,6 @@ softwarePackages:
     _bin: kustomize
     brew: kustomize
     choco: kustomize
-    port: kustomize
     go: sigs.k8s.io/kustomize/kustomize/v5@latest
   kvantum:
     _name: Kvantum
@@ -5852,7 +5803,6 @@ softwarePackages:
     brew: lazygit
     pacman: lazygit
     choco: lazygit
-    port: lazygit
     scoop: lazygit
     go: github.com/jesseduffield/lazygit@latest
     eopkg: lazygit
@@ -6154,7 +6104,6 @@ softwarePackages:
     dnf: lsd
     pacman: lsd
     choco: lsd
-    port: lsd
     pkg-freebsd: lsd
     scoop: lsd
     cargo: lsd
@@ -6483,7 +6432,6 @@ softwarePackages:
     _bin: mas
     _preload: true
     brew:darwin: mas
-    port: mas
   mask:
     _name: Mask
     _short: mask is a tool for managing and running tasks in the terminal with a simple and intuitive syntax.
@@ -6527,7 +6475,6 @@ softwarePackages:
     _bin: mcfly
     _deprecated: Deprecated in favor of atuin
     brew: mcfly
-    port: mcfly
     script:darwin: curl -LSfs https://raw.githubusercontent.com/cantino/mcfly/master/ci/install.sh | sh -s -- --git cantino/mcfly
     script:linux: curl -LSfs https://raw.githubusercontent.com/cantino/mcfly/master/ci/install.sh | sh -s -- --git cantino/mcfly
   medis:
@@ -6690,7 +6637,6 @@ softwarePackages:
     apt: miller
     dnf: miller
     choco: miller
-    port: miller
   minikube:
     _name: minikube
     _short: Minikube is a tool that enables you to run Kubernetes clusters locally for development and testing purposes.
@@ -6715,7 +6661,6 @@ softwarePackages:
     _preload: true
     brew: mise
     npm: '@jdxcode/mise'
-    port: port
     cargo: mise-cli
     apk: mise
   mitmproxy:
@@ -6898,7 +6843,6 @@ softwarePackages:
     apt: mono-complete
     dnf: mono-complete
     choco: mono
-    port: mono
     scoop: main/mono
     winget: Mono.Mono
   moon:
@@ -6920,7 +6864,6 @@ softwarePackages:
     apt: mosh
     dnf: mosh
     pacman: mosh
-    port: mosh
     pkg-freebsd: net/mosh
     apk: mosh
     emerge: net-misc/mosh
@@ -6952,7 +6895,6 @@ softwarePackages:
     dnf: mpg123
     pacman: mpg123
     choco: mpg123
-    port: mpg123
     scoop: mpg123
   mpv:
     _name: MPV
@@ -7263,7 +7205,6 @@ softwarePackages:
     - neovim
     - python-pynvim
     choco: neovim
-    port: neovim
     winget: Neovim.Neovim
     pkg:
     - neovim
@@ -7320,7 +7261,6 @@ softwarePackages:
     _preload: true
     brew: netdata
     pacman: netdata
-    port: netdata
     script: curl https://my-netdata.io/kickstart.sh > /tmp/netdata-kickstart.sh && sh /tmp/netdata-kickstart.sh
     _groups:
     - netdata
@@ -7377,7 +7317,6 @@ softwarePackages:
     dnf: nginx
     pacman: nginx
     choco: nginx
-    port: nginx
     scoop: nginx
     _groups:
     - www-data
@@ -7452,7 +7391,6 @@ softwarePackages:
     dnf: nmap
     pacman: nmap
     choco: nmap
-    port: nmap
     scoop: nmap
     snap: nmap
     _post:snap: sudo snap connect nmap:network-control
@@ -7625,7 +7563,6 @@ softwarePackages:
     dnf: nushell
     pacman: nushell
     choco: nushell
-    port: nushell
     scoop: nushell
     winget: nushell
     apk: nushell
@@ -7888,7 +7825,6 @@ softwarePackages:
     dnf: openssl
     pacman: openssl
     choco: openssl
-    port: openssl
     scoop: openssl
   openssl-osx-ca:
     _name: OpenSSL macOS CA
@@ -8176,7 +8112,6 @@ softwarePackages:
     brew: pgcli
     pipx: pgcli
     choco: pgcli
-    port: pgcli
   php:
     _name: PHP
     _short: The official repository for the PHP programming language source code.
@@ -8195,7 +8130,6 @@ softwarePackages:
     dnf: php
     pacman: php
     choco: php
-    port: php
     scoop: php
   php-extensions:
     _name: PHP Extensions
@@ -8301,7 +8235,6 @@ softwarePackages:
     brew: pick
     apt: pick
     dnf: pick
-    port: pick
     pkg-freebsd: pick
     yay: pick
     emerge: pick
@@ -8809,7 +8742,6 @@ softwarePackages:
     apt: privoxy
     dnf: privoxy
     pacman: privoxy
-    port: privoxy
     _groups:
     - privoxy
     _serviceEnabled: true
@@ -8849,7 +8781,6 @@ softwarePackages:
     apt: progress
     dnf: progress
     pacman: progress
-    port: progress
     zypper: progress
   projen:
     _name: Projen
@@ -9056,7 +8987,6 @@ softwarePackages:
     _bin: what
     brew: pywhat
     pipx: pywhat
-    port: pywhat
   pywin32:
     _name: Pywin32
     _short: pywin32 is a Python library that provides access to Windows-specific functions.
@@ -9292,7 +9222,6 @@ softwarePackages:
     - rclone
     - winfsp
     - nssm
-    port: rclone
     scoop: rclone
     _groups:
     - rclone
@@ -9428,7 +9357,6 @@ softwarePackages:
     apt: restic
     dnf: restic
     pacman: restic
-    port: restic
     pkg-freebsd: restic
     scoop: restic
     apk: restic
@@ -9456,7 +9384,6 @@ softwarePackages:
     dnf: ripgrep
     pacman: ripgrep
     choco: ripgrep
-    port: ripgrep
     scoop: ripgrep
     cargo: ripgrep
     pkg: ripgrep
@@ -9535,7 +9462,6 @@ softwarePackages:
     apt: rofi
     dnf:fedora: rofi
     pacman: rofi
-    port: rofi
     pkg: rofi
     zypper: rofi
   rsync:
@@ -9596,7 +9522,6 @@ softwarePackages:
     dnf: ruby-devel
     pacman: ruby
     choco: ruby
-    port: ruby
     scoop: ruby
   ruff:
     _name: Ruff
@@ -9643,9 +9568,6 @@ softwarePackages:
     - rust
     pacman: rust
     choco: rust
-    port:
-    - cargo
-    - rust
     scoop: rust
     script:darwin: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     script:linux: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -9765,7 +9687,6 @@ softwarePackages:
     apt: samba
     dnf: samba
     pacman: samba
-    port: samba4
     _bin:dnf: smb
     _groups:
     - sambausers
@@ -10032,7 +9953,6 @@ softwarePackages:
     _home: https://neurobin.org/projects/softwares/unix/shc/
     _docs: https://github.com/neurobin/shc
     brew: shc
-    port: shc
   shdoc:
     _name: shdoc
     _short: shdoc is a tool for generating documentation from shell scripts.
@@ -10075,7 +9995,6 @@ softwarePackages:
     dnf: shellcheck
     pacman: shellcheck
     choco: shellcheck
-    port: shellcheck
     pkg-freebsd: shellcheck
     scoop: shellcheck
     snap: shellcheck
@@ -10182,7 +10101,6 @@ softwarePackages:
     _bin: skaffold
     brew: skaffold
     choco: skaffold
-    port: skaffold
     scoop: extras/skaffold
   skate:
     _name: skate
@@ -10438,7 +10356,6 @@ softwarePackages:
     dnf: sqlite
     pacman: sqlite
     choco: sqlite
-    port: sqlite3
     scoop: sqlite
   squid:
     _name: Squid
@@ -10474,7 +10391,6 @@ softwarePackages:
     dnf: sshfs
     pacman: sshfs
     choco: sshfs
-    port: sshfs
     scoop: sshfs-np
   sshpass:
     _name: sshpass
@@ -10506,7 +10422,6 @@ softwarePackages:
     dnf: sshuttle
     pacman: sshuttle
     pipx: sshuttle
-    port: sshuttle
     emerge: net-proxy/sshuttle
     zypper: sshuttle
   ssl-proxy:
@@ -10572,7 +10487,6 @@ softwarePackages:
     brew: staticcheck
     dnf:fedora: golang-honnef-tools
     pacman: staticcheck
-    port: staticcheck
     scoop: staticcheck
     go: honnef.co/go/tools/cmd/staticcheck@latest
   stats:
@@ -10751,7 +10665,6 @@ softwarePackages:
       sudo: false
     brew: syncthing
     choco: syncthing
-    port: syncthing
     scoop: syncthing
     _serviceEnabled: true
     _env:
@@ -10833,7 +10746,6 @@ softwarePackages:
     _home: https://crates.io/crates/t-rec
     _docs: https://crates.io/crates/t-rec
     brew: t-rec
-    port: t-rec
     snap: t-rec --classic
     cargo: t-rec
     yay: t-rec
@@ -10874,7 +10786,6 @@ softwarePackages:
     cask: tailscale
     pacman: tailscale
     choco: tailscale
-    port: tailscale
     go: tailscale.com/cmd/tailscale{,d}@main
     mas: 1475387142
   talksheet:
@@ -10931,7 +10842,6 @@ softwarePackages:
     apt: taskwarrior
     dnf: task
     pacman: task
-    port: task
     emerge: task
     sbopkg: task
     xbps: task
@@ -11055,7 +10965,6 @@ softwarePackages:
     _home: https://github.com/tfutils/tfenv
     _docs: https://github.com/tfutils/tfenv#usage
     brew: tfenv
-    port: tfenv
     yay: tfenv
   tflint:
     _name: tflint
@@ -11277,7 +11186,6 @@ softwarePackages:
     apt: tor
     dnf: tor
     pacman: tor
-    port: tor
     _restricted: true
     _serviceEnabled: true
   tor-browser:
@@ -11535,7 +11443,6 @@ softwarePackages:
     dnf:fedora: upx
     pacman: upx
     choco: upx
-    port: upx
     scoop: upx
   usql:
     _name: Universal SQL CLI
@@ -11679,7 +11586,6 @@ softwarePackages:
     _docs: https://github.com/charmbracelet/vhs
     brew: vhs
     pacman: vhs
-    port: vhs
     scoop: vhs
     go: github.com/charmbracelet/vhs@latest
     xbps: vhs
@@ -11709,7 +11615,6 @@ softwarePackages:
     dnf: vim
     pacman: vim
     choco: vim
-    port: vim
     scoop: vim
   virtualbox:
     _name: VirtualBox
@@ -11879,7 +11784,6 @@ softwarePackages:
     apt: w3m
     dnf: w3m
     pacman: w3m
-    port: w3m
     zypper: w3m
   wails:
     _name: Wails
@@ -11953,7 +11857,6 @@ softwarePackages:
     _preload: true
     brew: watchman
     choco: watchman
-    port: watchman
     scoop: watchman
   waypoint:
     _name: HashiCorp Waypoint
@@ -12017,7 +11920,6 @@ softwarePackages:
     _github: https://github.com/vi/websocat
     _bin: websocat
     brew: websocat
-    port: websocat
     cargo: websocat
     github: github.com/vi/websocat
     pkg: websocat
@@ -12161,7 +12063,6 @@ softwarePackages:
     apt: wireguard
     dnf: wireguard-tools
     pacman: wireguard-tools
-    port: wireguard-tools
     apk: wireguard-tools
     emerge: wireguard-tools
     opkg: wireguard
@@ -12277,7 +12178,6 @@ softwarePackages:
     brew: wrk
     apt: wrk
     pacman: wrk
-    port: wrk
     xbps: wrk
   wsl:
     _name: wsl
@@ -12350,7 +12250,6 @@ softwarePackages:
     apt: xdotool
     dnf: xdotool
     pacman: xdotool
-    port: xdotool
     pkg-freebsd: xdotool
     _post:brew:darwin: defaults write org.x.X11 enable_test_extensions -boolean true
     zypper: xdotool
@@ -12377,7 +12276,6 @@ softwarePackages:
     _bin: xhyve
     _deprecated: Disabled on Homebrew because it has not been modified for several years and does not build properly
     brew:darwin: xhyve
-    port: xhyve
     _notes: Has not been modified for several years and has been disabled on Homebrew
   xpanes:
     _name: xpanes
@@ -12438,7 +12336,6 @@ softwarePackages:
     _github: https://github.com/BurntSushi/xsv
     _bin: xsv
     brew: xsv
-    port: xsv
     cargo: xsv
   xurls:
     _name: xurls
@@ -12456,7 +12353,6 @@ softwarePackages:
     _bin: xxh
     brew: xxh
     pipx: xxh-xxh
-    port: xxh
   xz:
     _name: xz
     _short: xz is a compression utility that provides high compression ratios and fast decompression.
@@ -12473,7 +12369,6 @@ softwarePackages:
     dnf: xz
     pacman: xz
     choco: xz
-    port: xz
     scoop: xz
     apk: xz
   yamllint:
@@ -12495,7 +12390,6 @@ softwarePackages:
     dnf: yank
     pacman: yank
     choco: win32yank
-    port: yank
     pkg-freebsd: yank
     scoop: win32yank
     _bin:apt: yank-cli
@@ -12522,7 +12416,6 @@ softwarePackages:
     pacman: yarn
     npm: yarn
     choco: yarn
-    port: yarn
     scoop: yarn
     script: curl -o- -L https://yarnpkg.com/install.sh | bash
   yarnhook:
@@ -12573,7 +12466,6 @@ softwarePackages:
     _docs: https://github.com/ytdl-org/youtube-dl/blob/master/README.md#readme
     brew: youtube-dl
     pipx: youtube-dl
-    port: youtube-dl
   youtube-music:
     _name: 'youtube-music                                                                                                                                                                                             '
     _short: youtube-music is a command-line tool for downloading music from YouTube.
@@ -12614,7 +12506,6 @@ softwarePackages:
     pacman: yt-dlp
     pipx: yt-dlp
     choco: yt-dlp
-    port: yt-dlp
     scoop: yt-dlp
     winget: yt-dlp
   yubikey-agent:
@@ -12715,7 +12606,6 @@ softwarePackages:
     brew: zola
     pacman: zola
     choco: zola
-    port: zola
     pkg-freebsd: zola
     scoop: zola
     snap: zola
@@ -12767,7 +12657,6 @@ softwarePackages:
     apt: zsh
     dnf: zsh
     pacman: zsh
-    port: zsh
   zsh-completions:
     _name: ZSH Completions
     _short: zsh-completions is a repository that provides additional completion definitions for the Zsh shell, enhancing auto-completion capabilities for various commands and utilities.

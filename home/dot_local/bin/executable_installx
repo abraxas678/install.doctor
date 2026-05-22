@@ -389,7 +389,6 @@ async function installPackages(pkgInstructions) {
       case 'pkg-freebsd':
       case 'pkg-termux':
       case 'pkgin':
-      case 'port':
       case 'snap':
         const command = `${combined[key].flatMap(x => x.installList).join(' ')}`
         process.env.DEBUG && console.log(command)

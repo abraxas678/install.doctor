@@ -686,20 +686,6 @@ installBrewPackages() {
   gum log -sl info 'Finished installing auxilary Homebrew packages'
 }
 
-ensureMacportsInstalled() {
-  if [ -d /Applications ] && [ -d /System ]; then
-    if ! command -v port > /dev/null; then
-      gum log -sl info 'Ensuring /opt/mports/macports-base is removed' && sudo rm -rf /opt/mports/macports-base
-      gum log -sl info 'Cloning source for macports to /opt/mports/macports-base' && sudo git clone --branch v2.8.0 --depth 1 https://github.com/macports/macports-base.git /opt/mports/macports-base
-      cd /opt/mports/macports-base
-      gum log -sl info 'Building macports' && sudo bash --noprofile --norc -c './configure --enable-readline && make && make install && make distclean'
-      gum log -sl info 'Adding /opt/local/bin to PATH because port is installed there'
-      export PATH="/opt/local/bin:$PATH"
-      gum log -sl info 'Running sudo port selfupdate' && sudo port selfupdate
-    fi
-  fi
-}
-
 setupSnap() {
   if [ ! -d /Applications ] && [ ! -d /System ] && command -v snap > /dev/null; then
     gum log -sl info 'Enabling snapd' && sudo systemctl enable snapd
@@ -815,7 +801,6 @@ setupLinuxHomebrewFonts() {
   fi
 }
 
-# TODO - Add install on macOS for macports
 if [ -n "$DEBUG" ] || [ -n "$DEBUG_MODE" ]; then
   gum log -sl info 'The DEBUG or DEBUG_MODE environment variable is set so preliminary system tweaks will be run synchronously'
   installXcode
@@ -824,7 +809,6 @@ if [ -n "$DEBUG" ] || [ -n "$DEBUG_MODE" ]; then
   configureGPG
   disableDStoreFileCreation
   enableDarkTransparentMode
-  ensureMacportsInstalled
   ensureUserGroup
   increaseMapCount
   installBrewPackages
@@ -851,7 +835,6 @@ else
   configureGPG &
   disableDStoreFileCreation &
   enableDarkTransparentMode &
-  ensureMacportsInstalled &
   ensureUserGroup &
   increaseMapCount &
   installDocker &

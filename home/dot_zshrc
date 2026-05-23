@@ -231,7 +231,7 @@ _id_lazy() {
   command -v "$cmd" >/dev/null 2>&1 || return 0
   eval "$cmd() { unfunction $cmd; eval \"\$(command $cmd $init)\"; $cmd \"\$@\"; }"
 }
-_id_lazy atuin       'init zsh'
+### Tools the user invokes directly (lazy-stubbed; init on first call):
 _id_lazy direnv      'hook zsh'
 _id_lazy mise        'activate zsh'
 _id_lazy rtx         'activate zsh'
@@ -241,6 +241,37 @@ _id_lazy pay-respects 'zsh --alias'
 _id_lazy zoxide      'init zsh'
 _id_lazy sheldon     'source'
 unfunction _id_lazy
+
+### atuin — lazy-bind Ctrl-R to a stub that initializes atuin on first
+### press, then immediately fires `atuin-search`. Net: zero startup cost,
+### first Ctrl-R takes ~50ms (imperceptible), every subsequent press is
+### identical to eager-init. Also stub the `atuin` CLI for direct use.
+if command -v atuin > /dev/null; then
+  _id_atuin_lazy() {
+    bindkey -r '^R' 2>/dev/null
+    eval "$(command atuin init zsh --disable-up-arrow)"
+    zle -N _id_atuin_lazy .self-insert  # neutralize; real binding now active
+    zle atuin-search 2>/dev/null || zle .history-incremental-search-backward
+  }
+  zle -N _id_atuin_lazy
+  bindkey '^R' _id_atuin_lazy
+  atuin() { unfunction atuin; eval "$(command atuin init zsh --disable-up-arrow)"; atuin "$@"; }
+fi
+
+### fzf — defer key-bindings + completion to precmd hook so they load
+### AFTER first prompt renders. Ctrl-T (file picker) and Alt-C (cd
+### picker) become available within ~10ms of the prompt appearing.
+### fzf-tab (TAB completion menus, different layer) is already loaded
+### via zinit turbo above.
+if [ -f "${HOMEBREW_PREFIX:-/opt/homebrew}/opt/fzf/shell/key-bindings.zsh" ]; then
+  _id_defer_fzf() {
+    add-zsh-hook -d precmd _id_defer_fzf
+    source "${HOMEBREW_PREFIX:-/opt/homebrew}/opt/fzf/shell/key-bindings.zsh"
+    [ -f "${HOMEBREW_PREFIX:-/opt/homebrew}/opt/fzf/shell/completion.zsh" ] && source "${HOMEBREW_PREFIX:-/opt/homebrew}/opt/fzf/shell/completion.zsh"
+  }
+  autoload -Uz add-zsh-hook
+  add-zsh-hook precmd _id_defer_fzf
+fi
 
 ### zoxide alias fallback — when zoxide isn't installed, keep `z` as a
 ### `cd` shortcut so muscle memory doesn't break

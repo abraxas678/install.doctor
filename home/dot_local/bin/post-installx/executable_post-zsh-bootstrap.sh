@@ -63,6 +63,24 @@ preWarmZinit() {
 }
 
 ###########################################################################
+# 2. Import existing shell history into atuin (idempotent — atuin
+#    dedupes on import). Only runs if atuin is installed and the local DB
+#    doesn't already have rows.
+###########################################################################
+importAtuinHistory() {
+  command -v atuin > /dev/null || { gum log -sl info 'atuin not installed; skipping history import'; return 0; }
+  local DB="${XDG_DATA_HOME:-$HOME/.local/share}/atuin/history.db"
+  if [ -f "$DB" ] && [ "$(stat -f %z "$DB" 2>/dev/null || echo 0)" -gt 16384 ]; then
+    gum log -sl info 'atuin history DB already populated; skipping import'
+    return 0
+  fi
+  ### atuin auto-detects the shell + history file. Falls back to explicit
+  ### HISTFILE if auto-detection fails (zsh history at a non-default path).
+  gum log -sl info 'Importing existing shell history into atuin'
+  HISTFILE="${HISTFILE:-${XDG_STATE_HOME:-$HOME/.local/state}/zsh/history}" atuin import auto 2>&1 | tail -3 | sed 's/^/  /'
+}
+
+###########################################################################
 # 2. Force Terminal.app default profile to use MesloLGS NF
 ###########################################################################
 configureTerminalFont() {
@@ -128,6 +146,7 @@ APPLESCRIPT
 # Main
 ###########################################################################
 preWarmZinit
+importAtuinHistory
 
 ### configureTerminalFont failure is purely cosmetic — zinit still
 ### works without it, but powerline glyphs render as tofu.

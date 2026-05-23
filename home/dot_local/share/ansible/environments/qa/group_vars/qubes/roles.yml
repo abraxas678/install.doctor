@@ -64,7 +64,6 @@ qubes_roles:
     - roles/languages/cocoapods
     - roles/virtualization/kvm
     - roles/virtualization/lxdc
-    - roles/virtualization/gvisor
     - roles/virtualization/dockerpushrm
     - roles/virtualization/dockerslim
     - roles/virtualization/kubernetes

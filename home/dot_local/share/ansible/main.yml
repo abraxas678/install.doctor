@@ -72,7 +72,6 @@
     - roles/virtualization/kvm
     - roles/virtualization/lxdc
     - roles/virtualization/gitdocker
-    - roles/virtualization/gvisor
     - roles/virtualization/swarm
     - roles/system/warp
     - roles/system/santa

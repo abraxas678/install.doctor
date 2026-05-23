@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 # @file ~/.local/bin/post-installx/post-zsh-bootstrap.sh
-# @brief Pre-warm antigen bundles + point Terminal.app at the Meslo Nerd Font
+# @brief Pre-warm zinit plugin cache, zcompile .zshrc, configure Terminal.app font
 # @description
-#   On the first interactive zsh launch antigen clones ~7 bundle repos
-#   (oh-my-zsh, zsh-autosuggestions, syntax-highlighting, fzf-tab,
-#   powerlevel10k, ...) into ~/.local/share/antigen/bundles and prints a
-#   wall of "Installing repo/name!..." lines. That happens *every* new
-#   machine the first time someone opens their terminal. We pre-run that
-#   here so the next interactive shell starts up silent and instant.
-#
-#   We also force Terminal.app's default profile to use the MesloLGS NF
-#   font and pin a 13pt size — powerlevel10k's prompt uses powerline
-#   glyphs that render as tofu in the stock SF Mono font.
+#   1. Pre-warm zinit plugins by sourcing ~/.zshrc once headless so the
+#      first interactive terminal launch is silent and instant. (Replaces
+#      the old antigen pre-warm path; antigen has been retired in favor of
+#      zinit turbo mode.)
+#   2. zcompile ~/.zshrc into ~/.zshrc.zwc so the zsh parser skips the
+#      ~30-50ms tokenize/parse cost on every shell launch.
+#   3. Force Terminal.app's default profile to use the MesloLGS Nerd Font
+#      Mono at 13pt — powerlevel10k's powerline glyphs render as tofu in
+#      the stock SF Mono.
 
 set -u
 
@@ -28,35 +27,38 @@ if ! command -v gum > /dev/null; then
 fi
 
 ###########################################################################
-# 1. Pre-warm antigen bundle cache
+# 1. Pre-warm zinit plugin cache + zcompile .zshrc
 ###########################################################################
-preWarmAntigen() {
-  local ANTIGEN_BIN="$HOME/.local/scripts/antigen.zsh"
-  local ANTIGEN_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/antigen"
-  if [ ! -f "$ANTIGEN_BIN" ]; then
-    gum log -sl warn "$ANTIGEN_BIN missing; skipping antigen pre-warm"
-    return 0
-  fi
+preWarmZinit() {
   if ! command -v zsh > /dev/null; then
-    gum log -sl warn 'zsh not found on PATH; skipping antigen pre-warm'
+    gum log -sl warn 'zsh not found on PATH; skipping zsh pre-warm'
     return 0
   fi
-  if [ -d "$ANTIGEN_HOME/bundles/romkatv/powerlevel10k" ] \
-     && [ -d "$ANTIGEN_HOME/bundles/zsh-users/zsh-syntax-highlighting" ]; then
-    gum log -sl info 'antigen bundles already populated; skipping pre-warm'
-    return 0
-  fi
+  local ZINIT_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/zinit/zinit.git"
+  local P10K_BUNDLE="${XDG_DATA_HOME:-$HOME/.local/share}/zinit/plugins/romkatv---powerlevel10k"
 
-  gum log -sl info 'Pre-warming antigen bundle cache by sourcing ~/.zshrc once'
-  ### POWERLEVEL9K_INSTANT_PROMPT=quiet suppresses the p10k instant-prompt
-  ### console-output warning that fires when antigen prints during init.
-  ### `< /dev/null` keeps zsh from blocking on a tty read.
-  POWERLEVEL9K_INSTANT_PROMPT=quiet zsh -i -c 'antigen reset 2>/dev/null; antigen apply 2>/dev/null; exit 0' < /dev/null > /dev/null 2>&1 || true
-
-  if [ -d "$ANTIGEN_HOME/bundles/romkatv/powerlevel10k" ]; then
-    gum log -sl info 'antigen bundles installed'
+  if [ -d "$ZINIT_HOME" ] && [ -d "$P10K_BUNDLE" ]; then
+    gum log -sl info 'zinit + powerlevel10k already populated; skipping plugin pre-warm'
   else
-    gum log -sl warn 'antigen pre-warm completed but bundle dir is still empty; first interactive zsh will install them'
+    gum log -sl info 'Pre-warming zinit plugins by sourcing ~/.zshrc once headless'
+    ### POWERLEVEL9K_INSTANT_PROMPT=quiet suppresses the p10k console-output
+    ### warning during the first sourcing (zinit clone output triggers it).
+    ### `< /dev/null` keeps zsh from blocking on a tty read; `wait` lets
+    ### turbo-mode plugins finish loading before we exit.
+    POWERLEVEL9K_INSTANT_PROMPT=quiet zsh -i -c 'zinit wait_for_complete 2>/dev/null; sleep 1; exit 0' < /dev/null > /dev/null 2>&1 || true
+    if [ -d "$P10K_BUNDLE" ]; then
+      gum log -sl info 'zinit plugin cache pre-warmed'
+    else
+      gum log -sl warn 'zinit pre-warm finished but powerlevel10k not present; first interactive zsh will clone it'
+    fi
+  fi
+
+  ### zcompile ~/.zshrc → ~/.zshrc.zwc. zsh checks for the .zwc on every
+  ### shell launch and skips re-parsing the .zshrc when present + newer
+  ### than its source. Saves ~30-50ms per shell launch.
+  if [ -f "$HOME/.zshrc" ]; then
+    gum log -sl info 'Compiling ~/.zshrc → ~/.zshrc.zwc'
+    zsh -fc "zcompile -R -- '$HOME/.zshrc.zwc' '$HOME/.zshrc'" 2>/dev/null || gum log -sl warn 'zcompile failed (non-fatal)'
   fi
 }
 
@@ -125,8 +127,8 @@ APPLESCRIPT
 ###########################################################################
 # Main
 ###########################################################################
-preWarmAntigen
+preWarmZinit
 
-### configureTerminalFont failure is purely cosmetic — antigen still
+### configureTerminalFont failure is purely cosmetic — zinit still
 ### works without it, but powerline glyphs render as tofu.
 configureTerminalFont || gum log -sl warn 'Terminal.app font configuration failed; set Terminal > Preferences > Profiles > Text > Font manually to MesloLGS NF.'

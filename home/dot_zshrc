@@ -316,9 +316,28 @@ add-zsh-hook precmd _id_defer_completions
 # Tools without a `(tool) init zsh` story — sourced from cached files
 # ---------------------------------------------------------------------------
 
-### Google Cloud SDK
-[ ! -f "$HOMEBREW_PREFIX/share/google-cloud-sdk/path.zsh.inc" ]       || source "$HOMEBREW_PREFIX/share/google-cloud-sdk/path.zsh.inc"
-[ ! -f "$HOMEBREW_PREFIX/share/google-cloud-sdk/completion.zsh.inc" ] || source "$HOMEBREW_PREFIX/share/google-cloud-sdk/completion.zsh.inc"
+### Google Cloud SDK — fleet-aware PATH + completion sourcing. Probe every
+### install location used across our supported OSes (macOS Homebrew cask,
+### apt-installed deb on Ubuntu/Debian, dnf-installed rpm on Fedora, snap
+### on Ubuntu, manual tarball under /opt/google-cloud-sdk, user-local
+### install under ~/google-cloud-sdk). First hit wins; subsequent paths
+### are skipped. `gcloud completion zsh` ALSO covers gcloud installed via
+### `curl https://sdk.cloud.google.com | bash` (which puts the SDK at
+### ~/google-cloud-sdk/).
+for _gcloud_root in \
+  "$HOMEBREW_PREFIX/share/google-cloud-sdk" \
+  /usr/lib/google-cloud-sdk \
+  /usr/share/google-cloud-sdk \
+  /opt/google-cloud-sdk \
+  /snap/google-cloud-sdk/current \
+  "$HOME/google-cloud-sdk"; do
+  if [ -f "$_gcloud_root/path.zsh.inc" ]; then
+    source "$_gcloud_root/path.zsh.inc"
+    [ -f "$_gcloud_root/completion.zsh.inc" ] && source "$_gcloud_root/completion.zsh.inc"
+    break
+  fi
+done
+unset _gcloud_root
 
 ### Goto — must `unalias` first; oh-my-zsh + several dotfile templates
 ### ship a `goto` alias that breaks the function definition

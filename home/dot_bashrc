@@ -123,8 +123,22 @@ if [ "$BASH_SUPPORT" = 'true' ] && [ -n "$BASH" ]; then
 	#   fi
   # fi
 
-  ### Google Cloud SDK
-  [ ! -f "${HOMEBREW_PREFIX}/share/google-cloud-sdk/path.bash.inc" ] || source "$HOMEBREW_PREFIX/share/google-cloud-sdk/path.bash.inc"
+  ### Google Cloud SDK — fleet-aware (macOS brew, apt/dnf, snap, manual install).
+  ### First-match-wins probe. Mirrors the zsh version in ~/.zshrc.
+  for _gcloud_root in \
+    "${HOMEBREW_PREFIX}/share/google-cloud-sdk" \
+    /usr/lib/google-cloud-sdk \
+    /usr/share/google-cloud-sdk \
+    /opt/google-cloud-sdk \
+    /snap/google-cloud-sdk/current \
+    "$HOME/google-cloud-sdk"; do
+    if [ -f "$_gcloud_root/path.bash.inc" ]; then
+      source "$_gcloud_root/path.bash.inc"
+      [ -f "$_gcloud_root/completion.bash.inc" ] && source "$_gcloud_root/completion.bash.inc"
+      break
+    fi
+  done
+  unset _gcloud_root
 
   ### direnv
   ! command -v direnv > /dev/null || eval "$(direnv hook bash)"

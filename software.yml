@@ -3537,7 +3537,7 @@ softwarePackages:
     _desc: '[Google Cloud SDK](https://cloud.google.com/sdk) includes tools and libraries for interacting with Google Cloud products and services. With it, you can orchestrate virtual machine instances directly from your command line, manage Compute Engine networks/firewalls/disks, simulate Pub/Sub locally, and much more.'
     _github: false
     _bin: gcloud
-    cask: google-cloud-sdk
+    cask: gcloud-cli
     choco: gcloudsdk
     snap: google-cloud-sdk --classic
     yay: google-cloud-sdk

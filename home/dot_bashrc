@@ -206,7 +206,9 @@ if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/shell/not-found-hook.sh" ]]; then
   }
 fi
 
-### Warpify support
-if [ "$TERM_PROGRAM" = 'WarpTerminal' ]; then
-  printf '\eP$f{"hook": "SourcedRcFileForWarp", "value": { "shell": "bash"}}\x9c'
-fi
+### Warp Terminal integration is auto-detected via TERM_PROGRAM=WarpTerminal.
+### Manual SourcedRcFileForWarp hook removed 2026-05-24 — it caused
+### double-injection where Warp's second-pass integration leaked as a
+### malformed heredoc (50-line warp_complete_via_compadd block + orphan EOM
+### + heredoc> prompts). Same fix applied to dot_zshrc. If you ever need to
+### force-resync Warp's integration, run `warp shell rcfile-bootstrap`.

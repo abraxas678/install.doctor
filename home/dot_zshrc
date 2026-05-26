@@ -371,10 +371,15 @@ xterm*|rxvt*|Eterm|aterm|kterm|gnome*|alacritty)
   ;;
 esac
 
-### Warpify support — Warp terminal sourcedRcFile hook
-if [ "$TERM_PROGRAM" = 'WarpTerminal' ]; then
-  printf '\eP$f{"hook": "SourcedRcFileForWarp", "value": { "shell": "zsh"}}\x9c'
-fi
+### Warp Terminal integration is AUTO-DETECTED from the WARP_IS_LOCAL_SHELL_SESSION /
+### TERM_PROGRAM=WarpTerminal env vars Warp injects itself. Don't emit a manual
+### `SourcedRcFileForWarp` DCS hook — when both Warp's auto-integration AND a
+### manual hook fire, Warp's second injection lands as a malformed heredoc:
+### the user sees a 50-line block of `function warp_complete_via_compadd_…`
+### printed to the terminal followed by an orphan `EOM` and `heredoc>` prompts.
+### Removed 2026-05-24 after that exact symptom was reported. If you ever need
+### to force-resync Warp's integration, run `warp shell rcfile-bootstrap`
+### manually instead of putting it in dot_zshrc.
 
 ### Toggle p10k 1-line ↔ 2-line prompt with Ctrl-P (kept from legacy
 ### config; bound to the same key)

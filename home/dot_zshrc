@@ -150,9 +150,15 @@ zinit light romkatv/powerlevel10k
 #     latest wait + atinit'zicompinit; zicdreplay' to finalize compinit.
 # ---------------------------------------------------------------------------
 
-### Syntax highlighting + autosuggestions + extra completions + fzf-tab
+### Syntax highlighting + autosuggestions + extra completions + fzf-tab.
+###
+### `zicompinit` is the correct zinit function (an earlier draft used
+### `zicompinit_fast` which does not exist and produced
+### "ERROR The 'zicompinit_fast' command was not found and could not be
+### loaded." on every shell launch). `zicompinit; zicdreplay` runs the
+### real `compinit` once + replays any pending `compdef` calls.
 zinit wait'0a' lucid light-mode for \
-  atinit"zicompinit_fast; zicdreplay" \
+  atinit"zicompinit; zicdreplay" \
     zdharma-continuum/fast-syntax-highlighting \
   atload"_zsh_autosuggest_start" \
     zsh-users/zsh-autosuggestions \
@@ -177,24 +183,38 @@ zinit wait'0b' lucid for \
   OMZP::zsh-interactive-cd \
   OMZP::zsh-navigation-tools
 
-### Git plugins — Brian uses these daily
+### Git plugins — Brian uses these daily.
+###
+### Removed (do not re-add): OMZP::git-flow + OMZP::gitfast. Both are
+### multi-file OMZ plugins (they `source` sibling files like `_git-flow`
+### and `git-prompt.sh`). zinit's `OMZP::` shorthand only downloads the
+### entry point — sibling files 404 — and the `svn` ice that fetches
+### the whole subdirectory requires Subversion which Apple removed from
+### macOS 10.14+. Net loss is small: brew's git ships full completion
+### via FPATH (so `gitfast` is redundant) and `git flow` completion is
+### niche enough to re-add per-machine if actually used.
 zinit wait'0c' lucid for \
   OMZP::git-extras \
   OMZP::git-auto-fetch \
-  OMZP::git-flow \
-  OMZP::gitfast \
   OMZP::github
 
-### Tool-specific plugins — gated on tool presence so an uninstalled tool
-### doesn't drag in dead completion definitions
+### Tool-specific plugins — gated on tool presence so an uninstalled
+### tool doesn't drag in dead completion definitions.
+###
+### Removed (do not re-add):
+###   - OMZP::node-docs — never existed in ohmyzsh/ohmyzsh (404)
+###   - OMZP::ripgrep   — never existed (ripgrep ships its own FPATH
+###                        completion from brew)
+###   - OMZP::macos     — multi-file plugin (sources `music`/`spotify`
+###                        sibling files); same svn-required issue as
+###                        gitfast/git-flow. Niche aliases (`cdf`,
+###                        `quick-look`, `tab`) can be added inline if
+###                        wanted.
 (( $+commands[docker] ))   && zinit wait'0d' lucid for OMZP::docker OMZP::docker-compose
 (( $+commands[kubectl] ))  && zinit wait'0d' lucid for OMZP::kubectx
 (( $+commands[terraform] )) && zinit wait'0d' lucid for OMZP::terraform
 (( $+commands[go] ))       && zinit wait'0d' lucid for OMZP::golang
-(( $+commands[node] ))     && zinit wait'0d' lucid for OMZP::node-docs
 (( $+commands[yarn] ))     && zinit wait'0d' lucid for OMZP::yarn
-(( $+commands[rg] ))       && zinit wait'0d' lucid for OMZP::ripgrep
-[ -d /Applications ] && [ -d /System ] && zinit wait'0d' lucid for OMZP::macos
 
 # ---------------------------------------------------------------------------
 # compinit — cached. Rebuilds the dump at most once per day instead of on
@@ -242,20 +262,18 @@ _id_lazy zoxide      'init zsh'
 _id_lazy sheldon     'source'
 unfunction _id_lazy
 
-### atuin — lazy-bind Ctrl-R to a stub that initializes atuin on first
-### press, then immediately fires `atuin-search`. Net: zero startup cost,
-### first Ctrl-R takes ~50ms (imperceptible), every subsequent press is
-### identical to eager-init. Also stub the `atuin` CLI for direct use.
+### atuin — defer init to first precmd hook (runs AFTER prompt renders, ~50ms
+### invisible to user). Earlier zle-widget lazy stub mis-handled the 7.3KB
+### init script and leaked its source to the terminal on first Ctrl-R; the
+### precmd-deferred pattern (same as fzf below) evals in a safe top-level
+### context and never leaks.
 if command -v atuin > /dev/null; then
-  _id_atuin_lazy() {
-    bindkey -r '^R' 2>/dev/null
+  _id_defer_atuin() {
+    add-zsh-hook -d precmd _id_defer_atuin
     eval "$(command atuin init zsh --disable-up-arrow)"
-    zle -N _id_atuin_lazy .self-insert  # neutralize; real binding now active
-    zle atuin-search 2>/dev/null || zle .history-incremental-search-backward
   }
-  zle -N _id_atuin_lazy
-  bindkey '^R' _id_atuin_lazy
-  atuin() { unfunction atuin; eval "$(command atuin init zsh --disable-up-arrow)"; atuin "$@"; }
+  autoload -Uz add-zsh-hook
+  add-zsh-hook precmd _id_defer_atuin
 fi
 
 ### fzf — defer key-bindings + completion to precmd hook so they load

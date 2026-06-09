@@ -316,8 +316,17 @@ zinit wait'0a' lucid light-mode for \
     zsh-users/zsh-autosuggestions \
   blockf atpull'zinit creinstall -q .' \
     zsh-users/zsh-completions \
-  aloxaf/fzf-tab \
-  marlonrichert/zsh-autocomplete
+  aloxaf/fzf-tab
+### REMOVED 2026-06-09: marlonrichert/zsh-autocomplete. The plugin
+### auto-completes inline as the user types — it runs `compgen` on every
+### keystroke. Combined with fzf-tab (TAB-driven menu) + zsh-autosuggestions
+### (async ghost text) + fast-syntax-highlighting (re-highlights on buffer
+### change), the four plugins together caused visible flicker, delayed
+### keystrokes, and prompt redraws that read as "the terminal messes up
+### after a few commands". fzf-tab + autosuggestions already cover the
+### completion UX without the per-keystroke cost. To re-enable, add the
+### line back AND set `zstyle ':autocomplete:*' min-input 3` so it only
+### fires after 3 chars typed (kills the per-keystroke spike).
 
 ### Oh-My-Zsh plugin snippets — only the ones whose underlying tool is
 ### actually installed or whose pure-zsh helper has lasting value
@@ -429,20 +438,17 @@ if command -v atuin > /dev/null; then
   _id_defer_atuin() {
     add-zsh-hook -d precmd _id_defer_atuin
     _id_eval_safe atuin-init command atuin init zsh --disable-up-arrow
-    ### Wrap atuin's installed _atuin_precmd if present so it can never
-    ### hang the prompt loop on a locked DB.
+    ### Wrap atuin's installed _atuin_precmd to run in a backgrounded
+    ### parens-subshell. `( cmd ) &!` is a single fork — no `zsh -c`
+    ### overhead — and the subshell inherits the parent's variables
+    ### (including $?, $HISTFILE, etc.) which atuin needs to record the
+    ### previous command. `&!` disowns immediately so the prompt loop
+    ### never waits on it. If atuin's DB is locked the background
+    ### subshell hangs harmlessly; the user never sees it.
     if typeset -f _atuin_precmd > /dev/null; then
       functions[_atuin_precmd_unsafe]=$functions[_atuin_precmd]
-      _atuin_precmd() {
-        ### Run the real atuin precmd; if it doesn't return in 200ms,
-        ### detach via & so the prompt continues immediately.
-        if (( $+commands[gtimeout] )); then
-          gtimeout --kill-after=1 0.2 zsh -c "$functions[_atuin_precmd_unsafe]; _atuin_precmd_unsafe" 2>/dev/null &!
-        else
-          _atuin_precmd_unsafe 2>/dev/null &!
-        fi
-      }
-      _id_log "GUARD _atuin_precmd wrapped with 200ms timeout"
+      _atuin_precmd() { ( _atuin_precmd_unsafe 2>/dev/null ) &! }
+      _id_log "GUARD _atuin_precmd wrapped (parens-subshell, &!-disowned)"
     fi
   }
   autoload -Uz add-zsh-hook
@@ -582,6 +588,31 @@ switch_powerlevel_multiline_prompt() {
 }
 zle -N switch_powerlevel_multiline_prompt
 bindkey ^P switch_powerlevel_multiline_prompt
+
+### Per-prompt timing tap. When INSTALL_DOCTOR_ZSHRC_DEBUG=1, every
+### preexec records when the command started and every precmd records
+### how long the prompt-redraw cycle took. If any prompt cycle exceeds
+### 100ms, the log gets a SLOW line naming the previous command. After
+### one interactive session the user can `grep SLOW
+### ~/.local/state/zsh/startup-*.log` to find the culprit.
+if [[ -n ${INSTALL_DOCTOR_ZSHRC_DEBUG:-} ]]; then
+  _id_preexec() {
+    typeset -g _id_last_cmd_start=${EPOCHREALTIME:-0}
+    typeset -g _id_last_cmd_body="$1"
+  }
+  _id_precmd() {
+    local _id_now=${EPOCHREALTIME:-0}
+    local _id_dur_ms=$(( (_id_now - ${_id_last_cmd_start:-_id_now}) * 1000 ))
+    if (( _id_dur_ms > 100 )); then
+      _id_log "SLOW  precmd cycle ${_id_dur_ms%.*}ms after cmd: '${_id_last_cmd_body:0:60}'"
+    else
+      _id_log "PROMPT ${_id_dur_ms%.*}ms (cmd: '${_id_last_cmd_body:0:40}')"
+    fi
+  }
+  autoload -Uz add-zsh-hook
+  add-zsh-hook preexec _id_preexec
+  add-zsh-hook precmd _id_precmd
+fi
 
 ### Panic key — Ctrl-Alt-X anywhere force-reloads zsh in case anything
 ### ever does manage to lock up. Single keypress recovery without having

@@ -205,7 +205,6 @@ zinit wait'0b' lucid for \
   OMZP::encode64 \
   OMZP::sudo \
   OMZP::safe-paste \
-  OMZP::magic-enter \
   OMZP::last-working-dir \
   OMZP::timer \
   OMZP::urltools \

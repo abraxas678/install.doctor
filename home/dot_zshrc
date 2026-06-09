@@ -48,6 +48,36 @@ export WORDCHARS=${WORDCHARS//\/}
 export PROMPT_EOL_MARK=
 export TIMEFMT=$'\nreal\t%E\nuser\t%U\nsys\t%S\ncpu\t%P'
 
+### Job control. `setopt monitor` only succeeds when zsh has a controlling
+### TTY (i.e. a real terminal). When invoked as a subprocess (Claude Code's
+### `zsh -i -c`, headless `script`, IDE-embedded shells), the option can't
+### be set and zsh prints `(anon):setopt:7: can't change option: monitor`.
+### Trying-and-suppressing keeps job control alive in real terminals AND
+### silences the message everywhere else. Also needed by powerlevel10k's
+### gitstatusd which spawns its daemon via job control — without this the
+### "[ERROR]: gitstatus failed to initialize" + "Restart Zsh to retry" wall
+### of text fires on every shell launch when there's no controlling TTY.
+setopt monitor 2>/dev/null || true
+
+### `POWERLEVEL9K_INSTANT_PROMPT=quiet` silences p10k's instant-prompt
+### console-output warnings (e.g. when zinit prints during plugin clones,
+### when gitstatusd can't init, when a sourced rcfile echoes). Without
+### this, the user opens Terminal/Warp and sees a 10-line p10k diagnostic
+### blob ABOVE the prompt — which IS the prompt-blocking behavior we're
+### fixing. `quiet` keeps instant-prompt fully functional; it just hushes
+### the diagnostic stream.
+typeset -g POWERLEVEL9K_INSTANT_PROMPT=quiet
+
+### When zsh is invoked without a controlling TTY (Claude Code's
+### `zsh -i -c`, headless `script` runs, IDE-embedded shells), p10k's
+### gitstatusd daemon can't spawn (it needs job control which requires a
+### TTY) and prints "ERROR: gitstatus failed to initialize" + "Restart
+### Zsh to retry" — that's the wall-of-text Brian sees when Claude Code
+### opens a subprocess to run a command. Disable gitstatus entirely in
+### that context; real terminal launches (stdin connected to a TTY) keep
+### the full git-status segment.
+[[ -t 0 ]] || POWERLEVEL9K_DISABLE_GITSTATUS=true
+
 ### Powerlevel10k instant prompt MUST come before any console output
 ### (echo, print, p10k themselves before this line, ...) — otherwise p10k
 ### prints a warning and disables the cached prompt for this session.

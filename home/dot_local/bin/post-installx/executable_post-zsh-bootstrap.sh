@@ -14,8 +14,14 @@
 
 set -u
 
-### Only run on macOS.
-[ -d /Applications ] && [ -d /System ] || exit 0
+### Detect OS once. Used to gate sections that only make sense on one
+### platform (Terminal.app font config = macOS-only; fc-cache = Linux).
+_IS_MAC=0; _IS_LINUX=0
+if [ -d /Applications ] && [ -d /System ]; then
+  _IS_MAC=1
+elif [ -f /etc/os-release ] || [ -d /etc ]; then
+  _IS_LINUX=1
+fi
 
 ### gum is the standard logger across install.doctor scripts. Fall back to
 ### plain echo if it isn't on PATH yet (e.g. when this runs very early in
@@ -25,6 +31,94 @@ if ! command -v gum > /dev/null; then
     if [ "${1:-}" = "log" ]; then shift; while [ "$#" -gt 0 ] && [ "${1#-}" != "$1" ]; do shift; done; printf '%s %s\n' "${1:-INFO}" "${2:-}"; else "$@"; fi
   }
 fi
+
+###########################################################################
+# Cross-platform Nerd Font installer
+#
+# Installs the 4 MesloLGS NF faces (Regular/Bold/Italic/Bold-Italic) on
+# whichever OS we're running. powerlevel10k's prompt uses powerline
+# glyphs + Nerd Font icons that render as tofu in any normal monospace
+# font — install.doctor's brand requires the prompt look right on every
+# fleet machine, not just macOS.
+#
+#   macOS — brew install --cask font-meslo-lg-nerd-font (handled at
+#           install time via run_before_04-requirements.sh.tmpl); this
+#           hook just verifies the install
+#   Linux — download p10k-media's pre-patched .ttf files (the canonical
+#           source for powerlevel10k) into ~/.local/share/fonts/, then
+#           refresh fc-cache. Works on Ubuntu/Debian/Fedora/Arch/Alpine/
+#           Coolify/Proxmox identically; no apt-vs-dnf forking needed.
+###########################################################################
+installNerdFont() {
+  local FONT_DIR
+  if [ "$_IS_MAC" = "1" ]; then
+    FONT_DIR="$HOME/Library/Fonts"
+  else
+    FONT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/fonts"
+  fi
+  mkdir -p "$FONT_DIR"
+
+  ### Already installed? (any of the brew-cask, p10k-media, or generic
+  ### Nerd Fonts releases drop a `MesloLGS NF Regular.ttf` or close
+  ### variant under one of two well-known directories.)
+  if ls "$FONT_DIR"/MesloLGS*NF*.ttf "$FONT_DIR"/MesloLGSNerd*.ttf /Library/Fonts/MesloLGS*.ttf 2>/dev/null | head -1 | grep -q .; then
+    gum log -sl info "MesloLGS NF already installed under $FONT_DIR"
+    return 0
+  fi
+
+  ### macOS path — brew cask should have landed it via the requirements
+  ### step. If it didn't (cask broken, network failure during install),
+  ### fall through to the direct download.
+  if [ "$_IS_MAC" = "1" ] && command -v brew > /dev/null 2>&1; then
+    if ! brew list --cask font-meslo-lg-nerd-font > /dev/null 2>&1; then
+      gum log -sl info 'Installing font-meslo-lg-nerd-font via Homebrew cask'
+      brew install --cask --quiet font-meslo-lg-nerd-font 2>/dev/null || gum log -sl warn 'brew cask install failed; falling back to direct download'
+    fi
+    if ls "$FONT_DIR"/MesloLGS*NF*.ttf "$FONT_DIR"/MesloLGSNerd*.ttf 2>/dev/null | head -1 | grep -q .; then
+      gum log -sl info 'MesloLGS NF installed via brew cask'
+      return 0
+    fi
+  fi
+
+  ### Direct download from romkatv/powerlevel10k-media — the canonical
+  ### p10k-blessed font drop. Works on every OS that has curl/wget. The
+  ### URLs are stable (it's a GitHub raw asset, not a release tarball).
+  local URL_BASE='https://github.com/romkatv/powerlevel10k-media/raw/master'
+  local FACES=(
+    'MesloLGS NF Regular.ttf'
+    'MesloLGS NF Bold.ttf'
+    'MesloLGS NF Italic.ttf'
+    'MesloLGS NF Bold Italic.ttf'
+  )
+  local _need_cache_refresh=0
+  for face in "${FACES[@]}"; do
+    local enc_face=$(printf %s "$face" | sed 's/ /%20/g')
+    local dest="$FONT_DIR/$face"
+    if [ -f "$dest" ]; then continue; fi
+    gum log -sl info "Downloading $face"
+    if command -v curl > /dev/null 2>&1; then
+      curl -fsSL --output "$dest" "$URL_BASE/$enc_face" 2>/dev/null || gum log -sl warn "Download failed: $face"
+    elif command -v wget > /dev/null 2>&1; then
+      wget -q -O "$dest" "$URL_BASE/$enc_face" 2>/dev/null || gum log -sl warn "Download failed: $face"
+    else
+      gum log -sl warn 'Neither curl nor wget available; cannot download Nerd Font'
+      return 1
+    fi
+    [ -s "$dest" ] && _need_cache_refresh=1
+  done
+
+  ### Refresh the font cache so apps see the new fonts immediately.
+  ### macOS handles this via atsutil; Linux uses fc-cache.
+  if (( _need_cache_refresh )); then
+    if [ "$_IS_MAC" = "1" ]; then
+      atsutil databases -remove > /dev/null 2>&1 || true
+    elif command -v fc-cache > /dev/null 2>&1; then
+      gum log -sl info 'Refreshing Linux font cache via fc-cache'
+      fc-cache -f "$FONT_DIR" > /dev/null 2>&1 || gum log -sl warn 'fc-cache returned non-zero'
+    fi
+    gum log -sl info "Nerd Font ready at $FONT_DIR"
+  fi
+}
 
 ###########################################################################
 # 1. Pre-warm zinit plugin cache + zcompile .zshrc
@@ -143,11 +237,24 @@ APPLESCRIPT
 }
 
 ###########################################################################
-# Main
+# Main — runs on every supported OS (macOS, Ubuntu, Fedora, Qubes,
+# Proxmox, Coolify, Alpine, Arch, WSL). Each function is OS-aware and
+# self-skips when not applicable.
 ###########################################################################
+
+### Nerd Font — runs on every OS. macOS uses the brew cask; Linux
+### downloads the 4 .ttf files from romkatv/powerlevel10k-media and runs
+### fc-cache. Without these the powerlevel10k prompt renders as tofu.
+installNerdFont || gum log -sl warn 'Nerd Font install returned non-zero; prompt glyphs may render as tofu'
+
+### zinit pre-warm + zsh compilation — runs on every OS that has zsh
+### installed.
 preWarmZinit
 importAtuinHistory
 
-### configureTerminalFont failure is purely cosmetic — zinit still
-### works without it, but powerline glyphs render as tofu.
-configureTerminalFont || gum log -sl warn 'Terminal.app font configuration failed; set Terminal > Preferences > Profiles > Text > Font manually to MesloLGS NF.'
+### Terminal.app font configuration — macOS-only. On Linux the host
+### terminal (Ghostty / Alacritty / gnome-terminal / Konsole / xterm) has
+### its own font config path and we don't try to drive every one.
+if [ "$_IS_MAC" = "1" ]; then
+  configureTerminalFont || gum log -sl warn 'Terminal.app font configuration failed; set Terminal > Preferences > Profiles > Text > Font manually to MesloLGS NF.'
+fi

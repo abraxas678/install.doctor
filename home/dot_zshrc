@@ -379,7 +379,27 @@ zinit wait'0c' lucid for \
 # ---------------------------------------------------------------------------
 # compinit — cached. Rebuilds the dump at most once per day instead of on
 # every shell launch (saves 50-100ms warm).
-# ---------------------------------------------------------------------------
+#
+# Before compinit runs we sweep ~/.local/share/zinit/completions for dangling
+# symlinks. zinit's `creinstall` ice symlinks every plugin's completion file
+# (e.g. _autocomplete__command -> .../zsh-autocomplete/Completions/...) into
+# this dir. When a plugin is removed via dot_zshrc edit + cache rm, the
+# symlinks remain — and compinit then prints `no such file or directory`
+# spam every shell launch. The `find -type l ! -exec test -e {} \;` test
+# finds links whose target is missing; `-delete` removes them. Force a
+# compdump rebuild when any are pruned so the now-stale dump doesn't
+# re-fail. The same sweep also runs for $HOMEBREW_PREFIX/share/zsh/site-functions
+# in case a brew-uninstalled formula leaves its completion behind.
+{
+  local _zdir="${XDG_DATA_HOME:-$HOME/.local/share}/zinit/completions"
+  if [[ -d "$_zdir" ]]; then
+    local _pruned=( "${(@f)$(/usr/bin/find "$_zdir" -maxdepth 1 -type l ! -exec test -e {} \; -print -delete 2>/dev/null)}" )
+    if (( ${#_pruned} > 0 && ${#_pruned[1]} > 0 )); then
+      _id_log "PRUNE  ${#_pruned} dangling zinit completion symlink(s)"
+      rm -f "$ZSH_COMPDUMP"  # force rebuild since the dump references them
+    fi
+  fi
+}
 autoload -Uz compinit
 {
   local _zcd="$ZSH_COMPDUMP"

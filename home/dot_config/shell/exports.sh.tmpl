@@ -558,9 +558,11 @@ export LESS_TERMCAP_us=$'\e[1;4;31m'
 export LESSHISTFILE="$XDG_STATE_HOME"/less/history
 export MANPAGER="less -X"
 
-### Magic Enter (ZSH)
-export MAGIC_ENTER_GIT_COMMAND='git status -u .'
-export MAGIC_ENTER_OTHER_COMMAND='ls -lh .'
+### Magic Enter (ZSH) — REMOVED 2026-06-09. The oh-my-zsh magic-enter
+### plugin (also removed from dot_zshrc) hijacked the Enter key on empty
+### buffers inside git repos, auto-firing `git status -u .` over and over.
+### Leaving these exports + the plugin off prevents any future re-add of
+### `OMZP::magic-enter` from silently restoring the runaway behavior.
 
 ### Line Wrap
 setterm -linewrap on 2>/dev/null

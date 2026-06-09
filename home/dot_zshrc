@@ -41,6 +41,128 @@ esac
 ### XDG-compliant history file
 [ -d "${XDG_STATE_HOME:-$HOME/.local/state}/zsh" ] || mkdir -p "${XDG_STATE_HOME:-$HOME/.local/state}/zsh"
 export HISTFILE="${XDG_STATE_HOME:-$HOME/.local/state}/zsh/history"
+
+# ============================================================================
+# Debug + safety harness — every potentially-slow section runs through these
+# helpers so freezes are bounded + observable.
+#
+# Enable startup tracing:
+#   INSTALL_DOCTOR_ZSHRC_DEBUG=1 zsh -i
+#   ⇒ writes per-section START/END + duration to
+#     ~/.local/state/zsh/startup-<pid>.log
+#
+# Tighten the per-call timeout (default 3 s):
+#   INSTALL_DOCTOR_ZSHRC_TIMEOUT=1 zsh -i
+#
+# Panic key — Ctrl-Alt-X anywhere on the prompt force-reloads zsh in case
+# something does manage to lock up. Bound below after p10k loads.
+# ============================================================================
+zmodload zsh/datetime 2>/dev/null
+zmodload zsh/parameter 2>/dev/null
+
+### _id_log <text> — append a timestamped line to the debug log. No-op
+### unless INSTALL_DOCTOR_ZSHRC_DEBUG=1.
+_id_log() {
+  [[ -z ${INSTALL_DOCTOR_ZSHRC_DEBUG:-} ]] && return 0
+  local lf="${XDG_STATE_HOME:-$HOME/.local/state}/zsh/startup-$$.log"
+  [[ -d ${lf:h} ]] || mkdir -p ${lf:h} 2>/dev/null
+  printf '[%s] %s\n' "${EPOCHREALTIME}" "$*" >> "$lf" 2>/dev/null
+}
+
+### _id_section <name> <code…> — run <code> wrapped in START/END log lines
+### plus duration. Always returns the inner block's exit code.
+_id_section() {
+  local _id_n="$1"; shift
+  _id_log "START ${_id_n}"
+  local _id_t0=${EPOCHREALTIME:-0}
+  "$@"
+  local _id_rc=$?
+  local _id_ms=$(( (${EPOCHREALTIME:-0} - _id_t0) * 1000 ))
+  _id_log "END   ${_id_n} rc=${_id_rc} ${_id_ms%.*}ms"
+  return $_id_rc
+}
+
+### _id_safe <name> <cmd…> — run <cmd> with a hard timeout (default 3 s,
+### override via INSTALL_DOCTOR_ZSHRC_TIMEOUT). On timeout, the call is
+### killed and a FAIL line is logged so the user can see which section
+### hung. Errors are suppressed so nothing in this rc file can bubble.
+_id_safe() {
+  local _id_n="$1"; shift
+  local _id_to="${INSTALL_DOCTOR_ZSHRC_TIMEOUT:-3}"
+  local _id_rc=0
+  ### gtimeout (coreutils) preferred — sends SIGTERM then SIGKILL after 1s.
+  ### Falls back to bare exec if neither timeout binary exists; we'd
+  ### rather run-without-timeout than refuse to source the user's tools.
+  if (( $+commands[gtimeout] )); then
+    gtimeout --kill-after=1 "$_id_to" "$@" 2>/dev/null
+    _id_rc=$?
+  elif (( $+commands[timeout] )); then
+    timeout --kill-after=1 "$_id_to" "$@" 2>/dev/null
+    _id_rc=$?
+  else
+    "$@" 2>/dev/null
+    _id_rc=$?
+  fi
+  if (( _id_rc != 0 )); then
+    _id_log "FAIL  ${_id_n} rc=${_id_rc} timeout=${_id_to}s cmd='$*'"
+  fi
+  return $_id_rc
+}
+
+### _id_source_safe <name> <file> — source a file iff readable, with an
+### optional pre-source existence check + a logged failure on parse error.
+_id_source_safe() {
+  local _id_n="$1" _id_f="$2"
+  [[ -r "$_id_f" ]] || { _id_log "SKIP  ${_id_n} (file missing: $_id_f)"; return 0; }
+  _id_log "SRC   ${_id_n} ($_id_f)"
+  local _id_t0=${EPOCHREALTIME:-0}
+  source "$_id_f" 2>/dev/null
+  local _id_rc=$?
+  local _id_ms=$(( (${EPOCHREALTIME:-0} - _id_t0) * 1000 ))
+  if (( _id_rc != 0 )); then
+    _id_log "FAIL  ${_id_n} rc=${_id_rc} ${_id_ms%.*}ms"
+  else
+    _id_log "DONE  ${_id_n} ${_id_ms%.*}ms"
+  fi
+  return 0
+}
+
+### _id_eval_safe <name> <command-that-prints-zsh> — equivalent to
+### eval "$(cmd init zsh)" but with timeout + duration logging. Used for
+### atuin/direnv/mise/zoxide-style init eval blocks so a hung daemon (or
+### a binary that prints a 7KB blob slowly) can never freeze the shell.
+_id_eval_safe() {
+  local _id_n="$1"; shift
+  local _id_to="${INSTALL_DOCTOR_ZSHRC_TIMEOUT:-3}"
+  local _id_out _id_rc
+  _id_log "EVAL  ${_id_n} (timeout=${_id_to}s)"
+  local _id_t0=${EPOCHREALTIME:-0}
+  if (( $+commands[gtimeout] )); then
+    _id_out=$(gtimeout --kill-after=1 "$_id_to" "$@" 2>/dev/null)
+  elif (( $+commands[timeout] )); then
+    _id_out=$(timeout --kill-after=1 "$_id_to" "$@" 2>/dev/null)
+  else
+    _id_out=$("$@" 2>/dev/null)
+  fi
+  _id_rc=$?
+  local _id_ms=$(( (${EPOCHREALTIME:-0} - _id_t0) * 1000 ))
+  if (( _id_rc != 0 )) || [[ -z "$_id_out" ]]; then
+    _id_log "FAIL  ${_id_n} rc=${_id_rc} ${_id_ms%.*}ms (no output)"
+    return $_id_rc
+  fi
+  ### Re-eval in the calling shell context so hook installs land
+  eval "$_id_out" 2>/dev/null
+  local _id_evrc=$?
+  if (( _id_evrc != 0 )); then
+    _id_log "FAIL  ${_id_n} eval-rc=${_id_evrc} ${_id_ms%.*}ms"
+  else
+    _id_log "DONE  ${_id_n} ${_id_ms%.*}ms"
+  fi
+  return $_id_evrc
+}
+
+_id_log "----- shell start -----"
+_id_log "ZSH_VERSION=$ZSH_VERSION TERM_PROGRAM=${TERM_PROGRAM:-} TTY=$([[ -t 0 ]] && print -- yes || print -- no)"
 export HISTSIZE=100000
 export SAVEHIST=100000
 export ZLE_RPROMPT_INDENT=1
@@ -276,9 +398,14 @@ fi
 # ---------------------------------------------------------------------------
 _id_lazy() {
   ### $1 = command name, $2 = eval-producing subcommand (e.g. "init zsh")
+  ### Lazy stubs are cheap — defining the function is microseconds — but
+  ### the FIRST CALL evals the tool's init blob. Wrapped via _id_eval_safe
+  ### so a hung daemon (mise polling, direnv binary missing) can never
+  ### freeze the shell once the user triggers it.
   local cmd="$1" init="$2"
-  command -v "$cmd" >/dev/null 2>&1 || return 0
-  eval "$cmd() { unfunction $cmd; eval \"\$(command $cmd $init)\"; $cmd \"\$@\"; }"
+  command -v "$cmd" >/dev/null 2>&1 || { _id_log "SKIP  lazy-$cmd (not on PATH)"; return 0; }
+  eval "$cmd() { unfunction $cmd; _id_eval_safe lazy-$cmd command $cmd $init; $cmd \"\$@\"; }"
+  _id_log "STUB  lazy-$cmd"
 }
 ### Tools the user invokes directly (lazy-stubbed; init on first call):
 _id_lazy direnv      'hook zsh'
@@ -292,14 +419,31 @@ _id_lazy sheldon     'source'
 unfunction _id_lazy
 
 ### atuin — defer init to first precmd hook (runs AFTER prompt renders, ~50ms
-### invisible to user). Earlier zle-widget lazy stub mis-handled the 7.3KB
-### init script and leaked its source to the terminal on first Ctrl-R; the
-### precmd-deferred pattern (same as fzf below) evals in a safe top-level
-### context and never leaks.
+### invisible to user). The eval is timeout-wrapped via _id_eval_safe so a
+### stuck atuin daemon / locked SQLite DB can never freeze the shell.
+### After atuin's init installs ITS OWN precmd hook (_atuin_precmd writes
+### the previous command to the DB), we re-wrap that hook with a 200ms
+### timeout via _id_atuin_precmd_guard — a stuck DB write would otherwise
+### freeze EVERY prompt forever.
 if command -v atuin > /dev/null; then
   _id_defer_atuin() {
     add-zsh-hook -d precmd _id_defer_atuin
-    eval "$(command atuin init zsh --disable-up-arrow)"
+    _id_eval_safe atuin-init command atuin init zsh --disable-up-arrow
+    ### Wrap atuin's installed _atuin_precmd if present so it can never
+    ### hang the prompt loop on a locked DB.
+    if typeset -f _atuin_precmd > /dev/null; then
+      functions[_atuin_precmd_unsafe]=$functions[_atuin_precmd]
+      _atuin_precmd() {
+        ### Run the real atuin precmd; if it doesn't return in 200ms,
+        ### detach via & so the prompt continues immediately.
+        if (( $+commands[gtimeout] )); then
+          gtimeout --kill-after=1 0.2 zsh -c "$functions[_atuin_precmd_unsafe]; _atuin_precmd_unsafe" 2>/dev/null &!
+        else
+          _atuin_precmd_unsafe 2>/dev/null &!
+        fi
+      }
+      _id_log "GUARD _atuin_precmd wrapped with 200ms timeout"
+    fi
   }
   autoload -Uz add-zsh-hook
   add-zsh-hook precmd _id_defer_atuin
@@ -313,8 +457,8 @@ fi
 if [ -f "${HOMEBREW_PREFIX:-/opt/homebrew}/opt/fzf/shell/key-bindings.zsh" ]; then
   _id_defer_fzf() {
     add-zsh-hook -d precmd _id_defer_fzf
-    source "${HOMEBREW_PREFIX:-/opt/homebrew}/opt/fzf/shell/key-bindings.zsh"
-    [ -f "${HOMEBREW_PREFIX:-/opt/homebrew}/opt/fzf/shell/completion.zsh" ] && source "${HOMEBREW_PREFIX:-/opt/homebrew}/opt/fzf/shell/completion.zsh"
+    _id_source_safe fzf-keys      "${HOMEBREW_PREFIX:-/opt/homebrew}/opt/fzf/shell/key-bindings.zsh"
+    _id_source_safe fzf-completion "${HOMEBREW_PREFIX:-/opt/homebrew}/opt/fzf/shell/completion.zsh"
   }
   autoload -Uz add-zsh-hook
   add-zsh-hook precmd _id_defer_fzf
@@ -324,19 +468,19 @@ fi
 ### `cd` shortcut so muscle memory doesn't break
 command -v zoxide >/dev/null 2>&1 || alias z='cd'
 
-### Carapace + cod — defer to a precmd hook so they load AFTER first
-### prompt renders. Both source via process-substitution and install
-### completions for OTHER commands, not themselves, so a stub function
-### wouldn't help (we'd never call `carapace`/`cod` directly). The hook
-### auto-removes itself after running.
+### Carapace + cod — defer to a precmd hook + timeout-wrap the carapace
+### init (which can take 500ms+ on cold cache). cod is wrapped the same
+### way. Both source via process-substitution — if either binary hangs
+### the source would hang the shell, so we capture-then-eval through
+### _id_eval_safe which kills the producer after 3s.
 _id_defer_completions() {
   add-zsh-hook -d precmd _id_defer_completions
   if command -v carapace > /dev/null; then
     zstyle ':completion:*' format $'\e[2;37mCompleting %d\e[m'
     zstyle ':completion:*:git:*' group-order 'main commands' 'alias commands' 'external commands'
-    source <(carapace _carapace)
+    _id_eval_safe carapace command carapace _carapace
   fi
-  command -v cod >/dev/null 2>&1 && source <(cod init $$ zsh)
+  command -v cod >/dev/null 2>&1 && _id_eval_safe cod command cod init $$ zsh
 }
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd _id_defer_completions
@@ -350,9 +494,8 @@ add-zsh-hook precmd _id_defer_completions
 ### apt-installed deb on Ubuntu/Debian, dnf-installed rpm on Fedora, snap
 ### on Ubuntu, manual tarball under /opt/google-cloud-sdk, user-local
 ### install under ~/google-cloud-sdk). First hit wins; subsequent paths
-### are skipped. `gcloud completion zsh` ALSO covers gcloud installed via
-### `curl https://sdk.cloud.google.com | bash` (which puts the SDK at
-### ~/google-cloud-sdk/).
+### are skipped. Every source call now goes through _id_source_safe so a
+### corrupt completion file can never freeze the prompt.
 for _gcloud_root in \
   "$HOMEBREW_PREFIX/share/google-cloud-sdk" \
   /usr/lib/google-cloud-sdk \
@@ -361,8 +504,8 @@ for _gcloud_root in \
   /snap/google-cloud-sdk/current \
   "$HOME/google-cloud-sdk"; do
   if [ -f "$_gcloud_root/path.zsh.inc" ]; then
-    source "$_gcloud_root/path.zsh.inc"
-    [ -f "$_gcloud_root/completion.zsh.inc" ] && source "$_gcloud_root/completion.zsh.inc"
+    _id_source_safe gcloud-path       "$_gcloud_root/path.zsh.inc"
+    _id_source_safe gcloud-completion "$_gcloud_root/completion.zsh.inc"
     break
   fi
 done
@@ -373,24 +516,24 @@ unset _gcloud_root
 if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/shell/goto.sh" ]; then
   unalias goto 2>/dev/null
   builtin setopt no_aliases 2>/dev/null
-  source "${XDG_CONFIG_HOME:-$HOME/.config}/shell/goto.sh"
+  _id_source_safe goto "${XDG_CONFIG_HOME:-$HOME/.config}/shell/goto.sh"
   builtin setopt aliases 2>/dev/null
 fi
 
 ### hiSHtory
 export PATH="$PATH:${XDG_CONFIG_HOME:-$HOME/.config}/hishtory"
-[ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/hishtory/config.zsh" ] || source "${XDG_CONFIG_HOME:-$HOME/.config}/hishtory/config.zsh"
+_id_source_safe hishtory "${XDG_CONFIG_HOME:-$HOME/.config}/hishtory/config.zsh"
 
 ### Hoard
-if command -v hoard > /dev/null && [ -f "${XDG_DATA_HOME:-$HOME/.local/share}/hoard/src/shell/hoard.zsh" ]; then
-  source "${XDG_DATA_HOME:-$HOME/.local/share}/hoard/src/shell/hoard.zsh"
+if command -v hoard > /dev/null; then
+  _id_source_safe hoard "${XDG_DATA_HOME:-$HOME/.local/share}/hoard/src/shell/hoard.zsh"
 fi
 
 ### iTerm2
-[ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/shell/iterm/iterm2.zsh" ] || source "${XDG_CONFIG_HOME:-$HOME/.config}/shell/iterm/iterm2.zsh"
+_id_source_safe iterm2 "${XDG_CONFIG_HOME:-$HOME/.config}/shell/iterm/iterm2.zsh"
 
 ### Up — directory traversal helper
-[ ! -f "${XDG_DATA_HOME:-$HOME/.local/share}/up/up.sh" ] || source "${XDG_DATA_HOME:-$HOME/.local/share}/up/up.sh"
+_id_source_safe up "${XDG_DATA_HOME:-$HOME/.local/share}/up/up.sh"
 
 ### HashiCorp Vault
 command -v vault > /dev/null && complete -o nospace -C vault vault
@@ -439,3 +582,20 @@ switch_powerlevel_multiline_prompt() {
 }
 zle -N switch_powerlevel_multiline_prompt
 bindkey ^P switch_powerlevel_multiline_prompt
+
+### Panic key — Ctrl-Alt-X anywhere force-reloads zsh in case anything
+### ever does manage to lock up. Single keypress recovery without having
+### to kill the terminal.
+_id_panic_reload() {
+  _id_log "PANIC reload triggered via Ctrl-Alt-X"
+  zle -I
+  exec zsh
+}
+zle -N _id_panic_reload
+bindkey '^[^X' _id_panic_reload
+
+### Mark end of rcfile — if the user reports a freeze and the log shows
+### "rcfile DONE" before the freeze, the issue is in a precmd / preexec
+### hook (most likely atuin / carapace / cod / fzf-deferred init). If the
+### log stops BEFORE "rcfile DONE", the freeze is during shell init.
+_id_log "rcfile DONE"

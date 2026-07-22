@@ -123,3 +123,4 @@ site/www/
 site/node_modules/
 site/dist/
 site/.firebase/
+.claude/settings.local.json

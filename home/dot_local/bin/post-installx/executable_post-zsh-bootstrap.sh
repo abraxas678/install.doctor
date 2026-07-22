@@ -175,32 +175,23 @@ importAtuinHistory() {
 }
 
 ###########################################################################
-# 2a. Detect installed MesloLGS Nerd Font family name (macOS-only)
-###########################################################################
-# font-meslo-lg-nerd-font ships `MesloLGSNerdFontMono-Regular.ttf`
-# (family `MesloLGS Nerd Font Mono`); the p10k-official download ships
-# `MesloLGS NF Regular.ttf` (family `MesloLGS NF`). Both render the same
-# powerline glyphs — we just need to use the family name macOS actually
-# knows about. Echoes the family name to stdout, or empty string + non-
-# zero if no face is registered.
-detectMesloFamily() {
-  if ls "$HOME/Library/Fonts/MesloLGSNerdFontMono-Regular.ttf" /Library/Fonts/MesloLGSNerdFontMono-Regular.ttf 2>/dev/null | grep -q .; then
-    printf 'MesloLGS Nerd Font Mono'
-  elif ls "$HOME/Library/Fonts/MesloLGSNerdFont-Regular.ttf" /Library/Fonts/MesloLGSNerdFont-Regular.ttf 2>/dev/null | grep -q .; then
-    printf 'MesloLGS Nerd Font'
-  elif ls "$HOME/Library/Fonts/MesloLGS NF Regular.ttf" "/Library/Fonts/MesloLGS NF Regular.ttf" 2>/dev/null | grep -q .; then
-    printf 'MesloLGS NF'
-  else
-    return 1
-  fi
-}
-
-###########################################################################
-# 2b. Force Terminal.app default profile to use MesloLGS NF
+# 2. Force Terminal.app default profile to use MesloLGS NF
 ###########################################################################
 configureTerminalFont() {
-  local FONT_FAMILY
-  if ! FONT_FAMILY="$(detectMesloFamily)"; then
+  ### Detect which MesloLGS face is actually installed and use its real
+  ### family name. font-meslo-lg-nerd-font ships `MesloLGSNerdFontMono-
+  ### Regular.ttf` (family `MesloLGS Nerd Font Mono`); the p10k-official
+  ### download ships `MesloLGS NF Regular.ttf` (family `MesloLGS NF`).
+  ### Both render the same powerline glyphs — we just need to use the
+  ### family name macOS actually knows about.
+  local FONT_FAMILY=""
+  if ls "$HOME/Library/Fonts/MesloLGSNerdFontMono-Regular.ttf" /Library/Fonts/MesloLGSNerdFontMono-Regular.ttf 2>/dev/null | grep -q .; then
+    FONT_FAMILY="MesloLGS Nerd Font Mono"
+  elif ls "$HOME/Library/Fonts/MesloLGSNerdFont-Regular.ttf" /Library/Fonts/MesloLGSNerdFont-Regular.ttf 2>/dev/null | grep -q .; then
+    FONT_FAMILY="MesloLGS Nerd Font"
+  elif ls "$HOME/Library/Fonts/MesloLGS NF Regular.ttf" "/Library/Fonts/MesloLGS NF Regular.ttf" 2>/dev/null | grep -q .; then
+    FONT_FAMILY="MesloLGS NF"
+  else
     gum log -sl warn 'No MesloLGS face found in ~/Library/Fonts or /Library/Fonts; skipping Terminal.app font config (cask font-meslo-lg-nerd-font may not have installed)'
     return 0
   fi
@@ -246,44 +237,6 @@ APPLESCRIPT
 }
 
 ###########################################################################
-# 2c. Force Warp default font to MesloLGS NF
-###########################################################################
-# Warp stores its font in ~/Library/Preferences/dev.warp.Warp-Stable.plist
-# as `FontName` (string) + `FontSize` (string). The settings.toml file
-# under ~/.warp/ is for AI-agent + privacy + telemetry config — font is
-# NOT in there. `defaults write` is the only reliable mutation path; the
-# change takes effect the next time Warp is launched.
-configureWarpFont() {
-  ### Bail early if Warp's prefs domain doesn't exist yet (Warp never
-  ### launched on this machine). The .plist is created on first launch.
-  if [ ! -f "$HOME/Library/Preferences/dev.warp.Warp-Stable.plist" ]; then
-    gum log -sl info 'Warp prefs not found at ~/Library/Preferences/dev.warp.Warp-Stable.plist; skipping Warp font config (launch Warp once, then re-run this script)'
-    return 0
-  fi
-
-  local FONT_FAMILY
-  if ! FONT_FAMILY="$(detectMesloFamily)"; then
-    gum log -sl warn 'No MesloLGS face found; skipping Warp font config'
-    return 0
-  fi
-
-  ### Idempotent: only `defaults write` when the current value differs.
-  local CURRENT_NAME CURRENT_SIZE
-  CURRENT_NAME="$(defaults read dev.warp.Warp-Stable FontName 2>/dev/null | tr -d '"' || true)"
-  CURRENT_SIZE="$(defaults read dev.warp.Warp-Stable FontSize 2>/dev/null | tr -d '"' || true)"
-
-  if [ "$CURRENT_NAME" = "$FONT_FAMILY" ] && [ "$CURRENT_SIZE" = "13" ]; then
-    gum log -sl info "Warp already configured for $FONT_FAMILY 13pt"
-    return 0
-  fi
-
-  gum log -sl info "Configuring Warp font: $FONT_FAMILY 13pt (was ${CURRENT_NAME:-unset} ${CURRENT_SIZE:-unset}pt)"
-  defaults write dev.warp.Warp-Stable FontName -string "$FONT_FAMILY"
-  defaults write dev.warp.Warp-Stable FontSize -string "13"
-  gum log -sl info 'Warp font updated. Restart Warp (Cmd-Q + relaunch) to see the change.'
-}
-
-###########################################################################
 # Main — runs on every supported OS (macOS, Ubuntu, Fedora, Qubes,
 # Proxmox, Coolify, Alpine, Arch, WSL). Each function is OS-aware and
 # self-skips when not applicable.
@@ -299,11 +252,9 @@ installNerdFont || gum log -sl warn 'Nerd Font install returned non-zero; prompt
 preWarmZinit
 importAtuinHistory
 
-### Terminal.app + Warp font configuration — macOS-only. On Linux the
-### host terminal (Ghostty / Alacritty / gnome-terminal / Konsole /
-### xterm) has its own font config path and we don't try to drive every
-### one. Both Mac terminals get pointed at the same MesloLGS family.
+### Terminal.app font configuration — macOS-only. On Linux the host
+### terminal (Ghostty / Alacritty / gnome-terminal / Konsole / xterm) has
+### its own font config path and we don't try to drive every one.
 if [ "$_IS_MAC" = "1" ]; then
   configureTerminalFont || gum log -sl warn 'Terminal.app font configuration failed; set Terminal > Preferences > Profiles > Text > Font manually to MesloLGS NF.'
-  configureWarpFont || gum log -sl warn 'Warp font configuration failed; open Warp > Settings > Appearance > Text and set Terminal Font to MesloLGS NF 13pt manually.'
 fi

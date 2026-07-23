@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file NGINX Amplify Join
 # @brief Set up NGINX Amplify and joins the cloud monitoring service dashboard
 # @description

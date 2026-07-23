@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file Atuin Initialization
 # @brief Registers with atuin, logs in, imports command history, and synchronizes
 

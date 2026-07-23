@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file GitHub Runner Registration
 # @brief Registers a GitHub action runner with GitHub
 # @description

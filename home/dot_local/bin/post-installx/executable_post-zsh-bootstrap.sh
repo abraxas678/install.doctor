@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file ~/.local/bin/post-installx/post-zsh-bootstrap.sh
 # @brief Pre-warm zinit plugin cache, zcompile .zshrc, configure Terminal.app font
 # @description

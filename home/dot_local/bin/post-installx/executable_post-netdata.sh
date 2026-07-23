@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file Netdata
 # @brief Connects Netdata with Netdata's free cloud dashboard and applies some system optimizations, if necessary
 # @description

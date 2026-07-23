@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file Tailscale
 # @brief Connects the Tailscale client with the Tailscale network
 # @description

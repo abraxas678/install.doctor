@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file Wazuh Client Install
 # @brief Installs the Wazuh client and connects to the manager if configured to do so through secrets / environment variables
 

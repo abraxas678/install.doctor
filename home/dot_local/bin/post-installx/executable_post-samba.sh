@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file Samba Configuration
 # @brief This script configures Samba by applying the configuration stored in `${XDG_DATA_HOME:-$HOME/.config}/samba/config` if the `smbd` application is available
 # @description

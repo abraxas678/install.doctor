@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file VirtualBox Extension Pack
 # @brief Ensures the VirtualBox extension pack is installed.
 # @description

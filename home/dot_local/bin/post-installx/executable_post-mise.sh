@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file Mise Install / Tweaks
 # @brief Performs initial install of mise targets and applies tweaks such as symlinking mise's Java version with the system Java target on macOS
 

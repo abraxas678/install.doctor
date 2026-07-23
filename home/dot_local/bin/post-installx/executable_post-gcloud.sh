@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file ~/.local/bin/post-installx/post-gcloud.sh
 # @brief Fleet-aware Google Cloud SDK post-install: install essential components,
 #        ensure CLOUDSDK_PYTHON is set, surface auth status.

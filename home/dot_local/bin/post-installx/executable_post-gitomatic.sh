@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file git-o-matic Configuration
 # @brief Starts service on Linux systems to monitor Git repositories
 # @description

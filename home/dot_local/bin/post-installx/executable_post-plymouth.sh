@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file Plymouth Theme / Configuration
 # @brief Configures Plymouth to use a custom theme
 # @description

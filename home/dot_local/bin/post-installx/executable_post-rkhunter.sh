@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file rkhunter configuration
 # @brief This script applies the rkhunter integration and updates it as well
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file Tabby Plugins
 # @brief This script installs the default Tabby plugins which are defined in `${XDG_CONFIG_HOME:-$HOME/.config}/tabby/plugins/package.json`
 # @description

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file SendGrid Postfix Configuration
 # @brief Configures Postfix to use SendGrid as a relay host so you can use the `mail` program to send e-mail from the command-line
 # @description

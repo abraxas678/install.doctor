@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file Rclone S3 Mounts
 # @brief This script configures Rclone to provide several S3-compliant mounts by leveraging CloudFlare R2
 # @description

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file VIM Plugins AOT Installation
 # @brief This script triggers VIM to pre-install plugins so that VIM loads into the desired state the first time it is invoked
 

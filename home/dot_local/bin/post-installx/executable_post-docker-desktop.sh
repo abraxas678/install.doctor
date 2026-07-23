@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file DockerHub Login
 # @brief Logs into DockerHub for Docker Desktop
 # @description

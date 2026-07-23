@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file Store Secrets in Keyring
 # @brief Stores secret environment variables into the System keyring
 # @description

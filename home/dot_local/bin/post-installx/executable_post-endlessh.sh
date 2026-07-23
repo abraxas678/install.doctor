@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file Endlessh Configuration
 # @brief Applies the Endlessh configuration and starts the service on Linux systems
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file NTFY Dependencies
 # @brief Eensures system dependencies are installed
 

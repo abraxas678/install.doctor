@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file juicefs_home_mount.sh
 # @description Ensures JuiceFS mounts the user's home directory on boot.
 # This script supports both macOS (LaunchDaemon) and Linux (systemd service).

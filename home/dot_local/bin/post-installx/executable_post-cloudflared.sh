@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file Cloudflared Configuration
 # @brief Applies cloudflared configuration, connects to Argo tunnel with managed configuration, and enables it on system start
 # @description

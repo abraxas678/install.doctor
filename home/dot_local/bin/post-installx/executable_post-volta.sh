@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @file Volta initialization
 # @brief This script initializes Volta and ensures the latest version of node and yarn are installed
 

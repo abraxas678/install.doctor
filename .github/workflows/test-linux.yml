@@ -158,6 +158,9 @@ jobs:
       - name: Validate software.yml schema
         run: bash scripts/validate-software-yml.sh
 
+      - name: Test template rendering
+        run: bash scripts/test-templates.sh
+
       - name: Test detect_os library
         run: |
           bash scripts/test-detect-os.sh

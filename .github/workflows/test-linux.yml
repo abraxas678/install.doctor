@@ -138,6 +138,9 @@ jobs:
           fi
           echo "testuser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
+      - name: Validate software.yml schema
+        run: bash scripts/validate-software-yml.sh
+
       - name: Test detect_os library
         run: |
           bash scripts/test-detect-os.sh

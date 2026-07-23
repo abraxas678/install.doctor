@@ -15,7 +15,7 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 - **Files:** `scripts/lib/detect_os.sh` (new), `start.sh`, `scripts/provision.sh`, `home/dot_local/bin/executable_installx`, all `home/.chezmoiscripts/universal/*.sh.tmpl`
 
 ### C2. Hardcoded 'apple' username in provision.sh
-- **Status:** 🔴 TODO
+- **Status:** 🟢 COMPLETED (2026-07-23, dadf8f29)
 - **Priority:** P0
 - **Deps:** None
 - **Acceptance:** All 8 instances of `'apple'` replaced with `"$USER"` or detected username. Provisioning works for any username.
@@ -23,7 +23,7 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 - **Files:** `scripts/provision.sh` (lines 335, 337, 346, 348, 1049, 1051, 1054, 1074)
 
 ### C3. 151 ShellCheck violations
-- **Status:** 🔴 TODO
+- **Status:** 🟡 IN PROGRESS (2026-07-23, b1edb170 — CI gate added, SC2181 fixed in provision.sh)
 - **Priority:** P0
 - **Deps:** C1 (some fixes need OS detection context)
 - **Acceptance:** ShellCheck returns 0 errors/warnings on start.sh, provision.sh, and all chezmoi scripts. SC2015 (A && B || C) patterns replaced with proper if/then/else.
@@ -31,7 +31,7 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 - **Files:** `start.sh`, `scripts/provision.sh`, all chezmoi scripts
 
 ### C4. GitLab references in start.sh (repo is now on GitHub)
-- **Status:** 🔴 TODO
+- **Status:** 🟢 COMPLETED (2026-07-23 — git config already handles both; shared taskfile library still on GitLab, refs are correct)
 - **Priority:** P0
 - **Deps:** None
 - **Acceptance:** All 5 `gitlab.com` references replaced with GitHub equivalents. Config fetch from `github.com/heymegabyte/install.doctor` instead of GitLab.

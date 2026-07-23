@@ -39,12 +39,8 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 - **Files:** `start.sh` (lines 26, 47, 457, 491, 494)
 
 ### C5. No `detect_os()` in chezmoi scripts (12 scripts duplicate OS checks)
-- **Status:** 🔴 TODO
+- **Status:** ❌ WON'T FIX — chezmoi scripts use Go template `{{ if eq .chezmoi.os "darwin" }}` branching at render time, not bash. Bash `detect_os()` is the wrong tool here; chezmoi's built-in `.chezmoi.os` is the correct approach.
 - **Priority:** P0
-- **Deps:** C1
-- **Acceptance:** All `home/.chezmoiscripts/universal/run_*.sh.tmpl` files source `detect_os()` instead of inline OS checks.
-- **Validation:** Each script sources `{{ .chezmoi.sourceDir }}/scripts/lib/detect_os.sh` and uses `detect_os` return value.
-- **Files:** All 10+ chezmoi scripts
 
 ---
 
@@ -67,8 +63,9 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 - **Files:** `software.yml`
 
 ### C8. No automated test suite
-- **Status:** 🔴 TODO
+- **Status:** 🟡 IN PROGRESS (2026-07-23, 81bab6f0 — detect_os test suite added, wired into CI)
 - **Priority:** P1
+- **Acceptance (remaining):** ShellCheck gate blocks, YAML schema validation for software.yml, chezmoi template render smoke test.
 - **Deps:** C5
 - **Acceptance:** At minimum: (a) ShellCheck in CI, (b) `bash -n` syntax check on all scripts, (c) chezmoi template render smoke test, (d) software.yml YAML schema validation. CI fails on violations.
 - **Validation:** `task lint` exits 0, `.github/workflows/test-linux.yml` includes all gates.

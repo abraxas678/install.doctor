@@ -154,7 +154,7 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 - **Files:** `scripts/provision.sh`, chezmoi scripts
 
 ### C21. provision.sh.tmpl drift (new — discovered 2026-07-23)
-- **Status:** 🔴 TODO
+- **Status:** 🟢 COMPLETED (2026-07-23, d8b9804f — backported detect_os, ensureInstallUser, HEADLESS_INSTALL gates to template; delta: 530→7 lines; CI threshold: 50)
 - **Priority:** P2
 - **Deps:** None
 - **Acceptance:** `scripts/src/provision.sh.tmpl` (655 lines) is synced with `scripts/provision.sh` (1186 lines). The template is the source of truth; the actual file is generated. Currently diverged by ~530 lines.

@@ -46,6 +46,15 @@ jobs:
           echo "ShellCheck violations (existing): $VIOLATIONS"
           echo "shellcheck_violations=$VIOLATIONS" >> "$GITHUB_OUTPUT"
 
+      - name: Audit deprecated packages
+        run: bash scripts/audit-deprecated.sh
+
+      - name: Generate SBOM
+        run: |
+          bash scripts/generate-sbom.sh --compact > sbom.json
+          echo "SBOM generated: $(wc -c < sbom.json) bytes"
+          echo "Components: $(python3 -c "import json; d=json.load(open('sbom.json')); print(len(d['components']))" 2>/dev/null || echo "N/A")"
+
       - name: Check for source drift
         run: |
           if ! git diff --quiet || ! git diff --cached --quiet; then

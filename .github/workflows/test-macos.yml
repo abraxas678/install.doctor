@@ -31,9 +31,9 @@ jobs:
           # macOS on Apple Silicon (latest)
           - os: "15 (Sequoia ARM64)"
             runner: macos-15
-          # macOS on Intel
-          - os: "13 (Ventura x64)"
-            runner: macos-13
+          # macOS on Intel (oldest available)
+          - os: "14 (Sonoma x64)"
+            runner: macos-14
 
     steps:
       - name: Checkout Repository

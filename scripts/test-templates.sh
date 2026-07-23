@@ -60,7 +60,7 @@ if command -v chezmoi &>/dev/null && [ -d "$HOME/.local/share/chezmoi" ]; then
     case "$rel" in
       scripts/*) continue ;;  # gomplate templates, not chezmoi
     esac
-    if ! chezmoi execute-template < "$f" > /dev/null 2>&1; then
+    if ! timeout 5 chezmoi execute-template < "$f" > /dev/null 2>&1; then
       echo "  FAIL: chezmoi execute-template failed on ${rel}"
       CHEZMOI_FAILS=$((CHEZMOI_FAILS + 1))
     fi

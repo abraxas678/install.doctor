@@ -7,7 +7,7 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 ## P0 — Critical (merge-blockers, security, correctness)
 
 ### C1. Centralized `detect_os()` function
-- **Status:** 🔴 TODO
+- **Status:** 🟢 COMPLETED (2026-07-23, 6ab5cbd6)
 - **Priority:** P0
 - **Deps:** None
 - **Acceptance:** Single `detect_os()` function returning `macos|ubuntu|debian|fedora|silverblue|alpine|arch|qubes-dom0|qubes-appvm|proxmox|coolify|wsl|container`. Consumed by start.sh, provision.sh, installx, and all chezmoi scripts. Replaces 25+ ad-hoc `[[ "$OSTYPE" == 'darwin'* ]]` / `[ -d /Applications ]` checks.

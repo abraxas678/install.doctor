@@ -83,7 +83,7 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 - **Files:** `software.yml`, `home/dot_local/bin/executable_installx`
 
 ### C10. Stale CI: chatgpt-review.yml, openhands.yml
-- **Status:** 🔴 TODO
+- **Status:** 🟢 COMPLETED (2026-07-23, bc3ddb90 — removed both, fixed macos-13 runner)
 - **Priority:** P1
 - **Deps:** None
 - **Acceptance:** Either updated to working state or removed. These reference external services that may no longer be configured.
@@ -116,14 +116,14 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 - **Files:** `scripts/provision.sh`
 
 ### C14. post-install hooks have no error handling standard
-- **Status:** 🟡 TODO
+- **Status:** 🟢 COMPLETED (2026-07-23, 63734571 — all 30 hooks now fail-fast with set -euo pipefail, _TEMPLATE.sh created)
 - **Priority:** P2
 - **Deps:** None
 - **Acceptance:** Each of 30 post-install hooks follows: (a) early-exit on wrong OS, (b) set -euo pipefail, (c) structured logging via logg(), (d) idempotent.
 - **Files:** `home/dot_local/bin/post-installx/*.sh`
 
 ### C15. installx still references Nix paths (nix-env, nix-pkg, nix-shell)
-- **Status:** 🟡 TODO
+- **Status:** 🟢 COMPLETED (2026-07-23, 925c7e08)
 - **Priority:** P2
 - **Deps:** None
 - **Acceptance:** Nix case branches in installx are removed (Nix was removed in f454d9e2). Dead code gone.

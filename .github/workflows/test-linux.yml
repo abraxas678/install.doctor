@@ -62,8 +62,8 @@ jobs:
             LIVE_LINES=$(wc -l < scripts/provision.sh | tr -d ' ')
             DELTA=$((LIVE_LINES - TMPL_LINES))
             echo "Template: $TMPL_LINES lines, Live: $LIVE_LINES lines, Delta: $DELTA"
-            if [ "$DELTA" -gt 500 ]; then
-              echo "::warning::Template drift: provision.sh has $DELTA more lines than provision.sh.tmpl"
+            if [ "$DELTA" -gt 50 ]; then
+              echo "::warning::Template drift: provision.sh has $DELTA more lines than provision.sh.tmpl (threshold: 50)"
             elif [ "$DELTA" -lt 0 ]; then
               echo "::error::Template has MORE lines than live — likely regression"
               exit 1

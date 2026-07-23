@@ -153,12 +153,13 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 - **Acceptance:** `detect_os()` returns `qubes-dom0` or `qubes-appvm`, scripts branch correctly.
 - **Files:** `scripts/provision.sh`, chezmoi scripts
 
-### C20. Proxmox post-install hooks not implemented
-- **Status:** 🟡 TODO
-- **Priority:** P3
-- **Deps:** Proxmox host available
-- **Acceptance:** post-proxmox.sh disables enterprise repo nag, enables no-subscription repo, installs qemu-guest-agent.
-- **Files:** New `home/dot_local/bin/post-installx/executable_post-proxmox.sh`
+### C21. provision.sh.tmpl drift (new — discovered 2026-07-23)
+- **Status:** 🔴 TODO
+- **Priority:** P2
+- **Deps:** None
+- **Acceptance:** `scripts/src/provision.sh.tmpl` (655 lines) is synced with `scripts/provision.sh` (1186 lines). The template is the source of truth; the actual file is generated. Currently diverged by ~530 lines.
+- **Validation:** `diff scripts/src/provision.sh.tmpl scripts/provision.sh` shows only expected template-to-rendered differences.
+- **Files:** `scripts/src/provision.sh.tmpl`, `scripts/provision.sh`
 
 ---
 

@@ -45,6 +45,15 @@ jobs:
           VIOLATIONS=$(grep -c "SC\|warning\|error" shellcheck.log || true)
           echo "ShellCheck violations (existing): $VIOLATIONS"
           echo "shellcheck_violations=$VIOLATIONS" >> "$GITHUB_OUTPUT"
+
+      - name: Check for source drift
+        run: |
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "::error::Source drift detected — uncommitted changes in chezmoi source"
+            git diff --stat
+            exit 1
+          fi
+          echo "Source drift: CLEAN"
   # ============================================================================
   # Native container tests - fast, no QEMU overhead
   # Tests the bootstrap script directly in each distro's container

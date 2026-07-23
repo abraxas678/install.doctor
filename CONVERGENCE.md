@@ -55,7 +55,7 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 - **Files:** `software.yml`
 
 ### C7. 35 software.yml entries with `_todo:` markers
-- **Status:** 🔴 TODO
+- **Status:** 🟡 IN PROGRESS (2026-07-23, 5db89d3b — 2 stale removed, 33 remaining are legitimate missing-install-method docs)
 - **Priority:** P1
 - **Deps:** None
 - **Acceptance:** Each `_todo:` entry completed or converted to a real TODO.md item. Missing install methods added, binary paths verified.
@@ -99,7 +99,7 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 - **Files:** New `.config/taskfiles/security/Taskfile-sbom.yml`, CI workflow
 
 ### C12. No drift detection
-- **Status:** 🟡 TODO
+- **Status:** 🟢 COMPLETED (2026-07-23, 36d073a2 — drift-check.sh with source + target drift detection, CI gate, task entries)
 - **Priority:** P2
 - **Deps:** C1
 - **Acceptance:** `task drift:check` runs `chezmoi diff` and reports any unmanaged changes. CI job runs weekly.

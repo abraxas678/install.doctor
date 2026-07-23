@@ -52,6 +52,10 @@ jobs:
           sysctl -n hw.memsize | awk '{print $0/1024/1024/1024 " GB"}'
           echo ""
 
+      - name: Test detect_os library
+        run: |
+          bash scripts/test-detect-os.sh
+
       - name: Run Install Doctor (headless)
         run: |
           export CI=true

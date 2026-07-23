@@ -120,6 +120,10 @@ jobs:
           fi
           echo "testuser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
+      - name: Test detect_os library
+        run: |
+          bash scripts/test-detect-os.sh
+
       - name: Run Install Doctor bootstrap (headless)
         run: |
           su - testuser -c '

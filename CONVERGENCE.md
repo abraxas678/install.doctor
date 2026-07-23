@@ -60,9 +60,10 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 - **Files:** `software.yml`
 
 ### C8. No automated test suite
-- **Status:** 🟡 IN PROGRESS (2026-07-23, 81bab6f0 — detect_os test suite added, wired into CI)
+- **Status:** 🟡 IN PROGRESS (2026-07-23 — detect_os test suite + software.yml schema validator + CI wiring all done)
 - **Priority:** P1
-- **Acceptance (remaining):** ShellCheck gate blocks, YAML schema validation for software.yml, chezmoi template render smoke test.
+- **Acceptance (done):** detect_os 14-assertion suite, software.yml 3-check validator, ShellCheck CI gate, source-drift CI gate
+- **Acceptance (remaining):** chezmoi template render smoke test
 - **Deps:** C5
 - **Acceptance:** At minimum: (a) ShellCheck in CI, (b) `bash -n` syntax check on all scripts, (c) chezmoi template render smoke test, (d) software.yml YAML schema validation. CI fails on violations.
 - **Validation:** `task lint` exits 0, `.github/workflows/test-linux.yml` includes all gates.

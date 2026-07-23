@@ -9,6 +9,31 @@
 #     Chezmoi to boost the performance in some spots by introducing asynchronous features.
 #
 #     **Note**: `https://install.doctor/start` points to this file.
+
+# Source centralized OS detection (replaces ad-hoc checks throughout)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/lib/detect_os.sh" ]; then
+  # shellcheck disable=SC1090
+  source "$SCRIPT_DIR/lib/detect_os.sh"
+else
+  # Minimal fallback for when the library isn't available
+  detect_os() {
+    if [[ "$OSTYPE" == 'darwin'* ]]; then echo "macos"; return 0; fi
+    if [ -f /etc/os-release ]; then
+      local id; id="$(. /etc/os-release && echo "${ID:-unknown}")"
+      case "$id" in ubuntu|debian|fedora|arch|alpine) echo "$id"; return 0 ;; esac
+    fi
+    [ -f /etc/debian_version ] && { echo "debian"; return 0; }
+    [ -f /etc/redhat-release ] && { echo "fedora"; return 0; }
+    [ -f /etc/arch-release ] && { echo "arch"; return 0; }
+    [ -f /etc/alpine-release ] && { echo "alpine"; return 0; }
+    [[ "$OSTYPE" == 'linux'* ]] && { echo "linux"; return 0; }
+    echo "unknown"
+  }
+  detect_role() { echo "${INSTALL_DOCTOR_ROLE:-unknown}"; }
+  detect_package_manager() { detect_os; }
+  is_headless() { [ "${HEADLESS_INSTALL:-}" = "true" ] && return 0; [ -z "${DISPLAY:-}" ] && return 0; return 1; }
+fi
 #
 #     ## Dependencies
 #
@@ -238,7 +263,7 @@ ensureBasicDeps() {
     elif command -v apk > /dev/null; then
       ### Alpine
       logg info 'Running sudo apk add build-base curl expect git moreutils rsync ruby procps file' && sudo apk add build-base curl expect git moreutils rsync ruby procps file
-    elif [ -d /Applications ] && [ -d /Library ]; then
+    elif [ "$(detect_os)" = "macos" ]; then
       ### macOS
       logg info "Ensuring Xcode Command Line Tools are installed.."
       if ! xcode-select -p >/dev/null 2>&1; then
@@ -393,7 +418,7 @@ ensureHomebrew() {
 #     After determining whether or not a reboot is required, the script will attempt to automatically
 #     reboot the machine.
 handleRequiredReboot() {
-  if [ -d /Applications ] && [ -d /System ]; then
+  if [ "$(detect_os)" = "macos" ]; then
     ### macOS
     if ! defaults read /Library/Updates/index.plist InstallAtLogout 2>&1 | grep 'does not exist' > /dev/null; then
       logg info 'There appears to be an update that requires a reboot'
@@ -415,7 +440,7 @@ handleRequiredReboot() {
 }
 # @description Prints information describing why full disk access is required for the script to run on macOS.
 printFullDiskAccessNotice() {
-  if [ -d /Applications ] && [ -d /System ]; then
+  if [ "$(detect_os)" = "macos" ]; then
     logg md "${XDG_DATA_HOME:-$HOME/.local/share}/chezmoi/docs/terminal/full-disk-access.md"
   fi
 }
@@ -436,7 +461,7 @@ printFullDiskAccessNotice() {
 #     @envvar HEADLESS_INSTALL  If set, skips the interactive full disk access prompt
 #     @see [Detecting Full Disk Access on macOS](https://www.dzombak.com/blog/2021/11/macOS-Scripting-How-to-tell-if-the-Terminal-app-has-Full-Disk-Access.html)
 ensureFullDiskAccess() {
-  if [ -d /Applications ] && [ -d /System ]; then
+  if [ "$(detect_os)" = "macos" ]; then
     if ! plutil -lint /Library/Preferences/com.apple.TimeMachine.plist > /dev/null ; then
       if [ -n "$HEADLESS_INSTALL" ]; then
         logg warn 'Full disk access is not available. Some macOS operations may fail in headless mode.'
@@ -472,7 +497,7 @@ ensureFullDiskAccess() {
 #
 #     @envvar HEADLESS_INSTALL  If set, skips certificate import (requires user interaction on macOS)
 importCloudFlareCert() {
-  if [ -d /Applications ] && [ -d /System ] && [ -z "$HEADLESS_INSTALL" ]; then
+  if [ "$(detect_os)" = "macos" ] && [ -z "$HEADLESS_INSTALL" ]; then
     ### Acquire certificate
     if [ -f "$HOME/.local/etc/ssl/cloudflare/cloudflare.crt" ]; then
       CRT_TMP="$HOME/.local/etc/ssl/cloudflare/cloudflare.crt"
@@ -797,7 +822,7 @@ ensureHomebrewDeps() {
   installBrewPackage "zx"
 
   ### macOS
-  if [ -d /Applications ] && [ -d /System ]; then
+  if [ "$(detect_os)" = "macos" ]; then
     ### gsed
     installBrewPackage "gsed"
     ### unbuffer / expect
@@ -822,7 +847,7 @@ cloneChezmoiSourceRepo() {
   ### When only CLT is present, xcodebuild exists as a stub but fails with
   ### "tool 'xcodebuild' requires Xcode" because the active developer dir
   ### points at /Library/Developer/CommandLineTools.
-  if [ -d /Applications ] && [ -d /System ]; then
+  if [ "$(detect_os)" = "macos" ]; then
     if command -v xcode-select > /dev/null && xcode-select -p 2>/dev/null | grep -q "Xcode.app"; then
       if command -v xcodebuild > /dev/null; then
         logg info 'Running xcodebuild -license accept'
@@ -943,7 +968,7 @@ runChezmoi() {
   fi
 
   ### Run chezmoi apply
-  if [ -d /System ] && [ -d /Applications ]; then
+  if [ "$(detect_os)" = "macos" ]; then
     # macOS: Check if display information is available
     system_profiler SPDisplaysDataType > /dev/null 2>&1
   else
@@ -998,7 +1023,7 @@ runChezmoi() {
 
 # @description Ensure temporary passwordless sudo privileges are removed from `/etc/sudoers`
 removePasswordlessSudo() {
-  if [ -d /Applications ] && [ -d /System ]; then
+  if [ "$(detect_os)" = "macos" ]; then
     logg info "Ensuring $USER is still an admin"
     sudo dscl . -merge /Groups/admin GroupMembership "$USER"
   fi
@@ -1128,7 +1153,7 @@ provisionLogic() {
   logg info "Applying passwordless sudo" && setupPasswordlessSudo
   logg info "Ensuring system dependencies are installed" && ensureBasicDeps
   logg info "Cloning / updating source repository" && cloneChezmoiSourceRepo
-  if [ -d /Applications ] && [ -d /System ]; then
+  if [ "$(detect_os)" = "macos" ]; then
     ### macOS only
     logg info "Ensuring full disk access from current terminal application" && ensureFullDiskAccess
     logg info "Ensuring CloudFlare certificate imported into system certificates" && importCloudFlareCert

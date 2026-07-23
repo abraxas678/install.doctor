@@ -27,6 +27,32 @@ git config url."https://gitlab.com/".insteadOf git@gitlab.com:
 git config url."https://github.com/".insteadOf git@github.com:
 set -eo pipefail
 
+# @description Detect the base operating system (embedded copy — start.sh runs
+# before the repo is cloned, so it can't source scripts/lib/detect_os.sh).
+# Returns: macos|ubuntu|debian|fedora|alpine|arch|wsl|container|linux|unknown
+detect_os() {
+  if [ -f /proc/sys/fs/binfmt_misc/WSLInterop ] || grep -qi microsoft /proc/version 2>/dev/null; then echo "wsl"; return 0; fi
+  if [ -f /.dockerenv ] || grep -qE 'docker|lxc|containerd' /proc/1/cgroup 2>/dev/null; then echo "container"; return 0; fi
+  if [[ "$OSTYPE" == 'darwin'* ]]; then echo "macos"; return 0; fi
+  if [ -f /etc/os-release ]; then
+    local id; id="$(. /etc/os-release && echo "${ID:-unknown}")"
+    case "$id" in
+      ubuntu) echo "ubuntu"; return 0 ;;
+      debian) echo "debian"; return 0 ;;
+      fedora|rhel|centos|rocky|almalinux|ol) echo "fedora"; return 0 ;;
+      arch|archlinux|manjaro) echo "arch"; return 0 ;;
+      alpine) echo "alpine"; return 0 ;;
+      opensuse*|sles) echo "fedora"; return 0 ;;
+    esac
+  fi
+  [ -f /etc/redhat-release ] && { echo "fedora"; return 0; }
+  [ -f /etc/debian_version ] && { echo "debian"; return 0; }
+  [ -f /etc/arch-release ] && { echo "arch"; return 0; }
+  [ -f /etc/alpine-release ] && { echo "alpine"; return 0; }
+  [[ "$OSTYPE" == 'linux'* ]] && { echo "linux"; return 0; }
+  echo "unknown"
+}
+
 # @description Initialize variables
 DELAYED_CI_SYNC=""
 ENSURED_TASKFILES=""
@@ -162,17 +188,13 @@ function ensureRedHatPackageInstalled() {
 function ensureRootPackageInstalled() {
   export CAN_USE_SUDO='false'
   if ! type "$1" &> /dev/null; then
-    if [[ "$OSTYPE" == 'linux'* ]]; then
-      if [ -f "/etc/redhat-release" ]; then
-        ensureRedHatPackageInstalled "$1"
-      elif [ -f "/etc/debian_version" ]; then
-        ensureDebianPackageInstalled "$1"
-      elif [ -f "/etc/arch-release" ]; then
-        ensureArchPackageInstalled "$1"
-      elif [ -f "/etc/alpine-release" ]; then
-        ensureAlpinePackageInstalled "$1"
-      fi
-    fi
+    local os; os="$(detect_os)"
+    case "$os" in
+      fedora)     ensureRedHatPackageInstalled "$1" ;;
+      ubuntu|debian) ensureDebianPackageInstalled "$1" ;;
+      arch)       ensureArchPackageInstalled "$1" ;;
+      alpine)     ensureAlpinePackageInstalled "$1" ;;
+    esac
   fi
 }
 
@@ -204,7 +226,8 @@ fi
 # @exitcode 0 If the PATH was appropriately updated or did not need updating
 # @exitcode 1+ If the OS is unsupported
 function ensureLocalPath() {
-  if [[ "$OSTYPE" == 'darwin'* ]] || [[ "$OSTYPE" == 'linux'* ]]; then
+  local os; os="$(detect_os)"
+  if [ "$os" = "macos" ] || [ "$os" != "unknown" ]; then
     # shellcheck disable=SC2016
     PATH_STRING='export PATH="$HOME/.local/bin:$PATH"'
     mkdir -p "$HOME/.local/bin"
@@ -212,12 +235,6 @@ function ensureLocalPath() {
       echo -e "${PATH_STRING}\n" >> "$HOME/.profile"
       logger info "Updated the PATH variable to include ~/.local/bin in $HOME/.profile"
     fi
-  elif [[ "$OSTYPE" == 'cygwin' ]] || [[ "$OSTYPE" == 'msys' ]] || [[ "$OSTYPE" == 'win32' ]]; then
-    logger error "Windows is not directly supported. Use WSL or Docker." && exit 1
-  elif [[ "$OSTYPE" == 'freebsd'* ]]; then
-    logger error "FreeBSD support not added yet" && exit 1
-  else
-    logger warn "System type not recognized"
   fi
 }
 
@@ -230,35 +247,15 @@ function ensureLocalPath() {
 function ensurePackageInstalled() {
   export CAN_USE_SUDO='true'
   if ! type "$1" &> /dev/null; then
-    if [[ "$OSTYPE" == 'darwin'* ]]; then
-      brew install "$1"
-    elif [[ "$OSTYPE" == 'linux'* ]]; then
-      if [ -f "/etc/redhat-release" ]; then
-        ensureRedHatPackageInstalled "$1"
-      elif [ -f "/etc/debian_version" ]; then
-        ensureDebianPackageInstalled "$1"
-      elif [ -f "/etc/arch-release" ]; then
-        ensureArchPackageInstalled "$1"
-      elif [ -f "/etc/alpine-release" ]; then
-        ensureAlpinePackageInstalled "$1"
-      elif type dnf &> /dev/null || type yum &> /dev/null; then
-        ensureRedHatPackageInstalled "$1"
-      elif type apt-get &> /dev/null; then
-        ensureDebianPackageInstalled "$1"
-      elif type pacman &> /dev/null; then
-        ensureArchPackageInstalled "$1"
-      elif type apk &> /dev/null; then
-        ensureAlpinePackageInstalled "$1"
-      else
-        logger error "$1 is missing. Please install $1 to continue." && exit 1
-      fi
-    elif [[ "$OSTYPE" == 'cygwin' ]] || [[ "$OSTYPE" == 'msys' ]] || [[ "$OSTYPE" == 'win32' ]]; then
-      logger error "Windows is not directly supported. Use WSL or Docker." && exit 1
-    elif [[ "$OSTYPE" == 'freebsd'* ]]; then
-      logger error "FreeBSD support not added yet" && exit 1
-    else
-      logger error "System type not recognized"
-    fi
+    local os; os="$(detect_os)"
+    case "$os" in
+      macos) brew install "$1" ;;
+      ubuntu|debian) ensureDebianPackageInstalled "$1" ;;
+      fedora) ensureRedHatPackageInstalled "$1" ;;
+      arch) ensureArchPackageInstalled "$1" ;;
+      alpine) ensureAlpinePackageInstalled "$1" ;;
+      *) logger error "$1 is missing. Please install $1 to continue." && exit 1 ;;
+    esac
   fi
 }
 
@@ -273,15 +270,11 @@ function ensureTaskInstalled() {
   # @description Release API URL used to get the latest release's version
   TASK_RELEASE_API="https://api.github.com/repos/go-task/task/releases/latest"
   if ! type task &> /dev/null; then
-    if [[ "$OSTYPE" == 'darwin'* ]] || [[ "$OSTYPE" == 'linux-gnu'* ]] || [[ "$OSTYPE" == 'linux-musl' ]]; then
-      installTask
-    elif [[ "$OSTYPE" == 'cygwin' ]] || [[ "$OSTYPE" == 'msys' ]] || [[ "$OSTYPE" == 'win32' ]]; then
-      logger error "Windows is not directly supported. Use WSL or Docker." && exit 1
-    elif [[ "$OSTYPE" == 'freebsd'* ]]; then
-      logger error "FreeBSD support not added yet" && exit 1
-    else
-      logger error "System type not recognized. You must install task manually." && exit 1
-    fi
+    local os; os="$(detect_os)"
+    case "$os" in
+      macos|ubuntu|debian|fedora|alpine|arch|linux) installTask ;;
+      *) logger error "System type not recognized ($os). You must install task manually." && exit 1 ;;
+    esac
   else
     mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/megabyte/start.sh"
     if [ -f "${XDG_CACHE_HOME:-$HOME/.cache}/megabyte/start.sh/bodega-update-check" ]; then
@@ -337,8 +330,9 @@ function installTask() {
   CHECKSUMS_URL="$TASK_RELEASE_URL/download/task_checksums.txt"
   DOWNLOAD_DESTINATION=/tmp/megabytelabs/task.tar.gz
   TMP_DIR=/tmp/megabytelabs
-  logger info "Checking if install target is macOS or Linux"
-  if [[ "$OSTYPE" == 'darwin'* ]]; then
+  local os; os="$(detect_os)"
+  logger info "Detected OS: $os"
+  if [ "$os" = "macos" ]; then
     DOWNLOAD_URL="$TASK_RELEASE_URL/download/task_darwin_amd64.tar.gz"
   else
     DOWNLOAD_URL="$TASK_RELEASE_URL/download/task_linux_amd64.tar.gz"
@@ -391,7 +385,8 @@ function installTask() {
 # @exitcode 0 The checksum is valid or the system is unrecognized
 # @exitcode 1+ The OS is unsupported or if the checksum is invalid
 function sha256() {
-  if [[ "$OSTYPE" == 'darwin'* ]]; then
+  local os; os="$(detect_os)"
+  if [ "$os" = "macos" ]; then
     if type brew &> /dev/null && ! type sha256sum &> /dev/null; then
       brew install coreutils
     else
@@ -405,22 +400,18 @@ function sha256() {
     else
       logger warn "Checksum validation is being skipped for $1 because the sha256sum program is not available"
     fi
-  elif [[ "$OSTYPE" == 'linux-gnu'* ]]; then
-    if ! type shasum &> /dev/null; then
-      logger warn "Checksum validation is being skipped for $1 because the shasum program is not installed"
-    else
-      echo "$2  $1" | shasum -s -a 256 -c
-    fi
-  elif [[ "$OSTYPE" == 'linux-musl' ]]; then
+  elif [ "$os" = "alpine" ]; then
     if ! type sha256sum &> /dev/null; then
       logger warn "Checksum validation is being skipped for $1 because the sha256sum program is not available"
     else
       echo "$2  $1" | sha256sum -c
     fi
-  elif [[ "$OSTYPE" == 'cygwin' ]] || [[ "$OSTYPE" == 'msys' ]] || [[ "$OSTYPE" == 'win32' ]]; then
-    logger error "Windows is not directly supported. Use WSL or Docker." && exit 1
-  elif [[ "$OSTYPE" == 'freebsd'* ]]; then
-    logger error "FreeBSD support not added yet" && exit 1
+  elif [ "$os" != "unknown" ] && [ "$os" != "wsl" ] && [ "$os" != "container" ]; then
+    if ! type shasum &> /dev/null; then
+      logger warn "Checksum validation is being skipped for $1 because the shasum program is not installed"
+    else
+      echo "$2  $1" | shasum -s -a 256 -c
+    fi
   else
     logger warn "System type not recognized. Skipping checksum validation."
   fi
@@ -528,7 +519,8 @@ fi
 ensureLocalPath
 
 # @description Ensures base dependencies are installed
-if [[ "$OSTYPE" == 'darwin'* ]]; then
+OS="$(detect_os)"
+if [ "$OS" = "macos" ]; then
   if ! type curl &> /dev/null && type brew &> /dev/null; then
     brew install curl
   fi
@@ -537,7 +529,7 @@ if [[ "$OSTYPE" == 'darwin'* ]]; then
     logger info 'Git is not present. A password may be required to run sudo xcode-select --install'
     sudo xcode-select --install
   fi
-elif [[ "$OSTYPE" == 'linux-gnu'* ]] || [[ "$OSTYPE" == 'linux-musl'* ]]; then
+elif [ "$OS" != "unknown" ] && [ "$OS" != "wsl" ] && [ "$OS" != "container" ]; then
   if ! type curl &> /dev/null || ! type git &> /dev/null || ! type gzip &> /dev/null || ! type sudo &> /dev/null || ! type jq &> /dev/null; then
     ensurePackageInstalled "curl"
     ensurePackageInstalled "file"
@@ -550,7 +542,7 @@ fi
 
 # @description Ensures Homebrew, Poetry, and Volta are installed
 if [ -z "$NO_INSTALL_HOMEBREW" ]; then
-  if [[ "$OSTYPE" == 'darwin'* ]] || [[ "$OSTYPE" == 'linux-gnu'* ]] || [[ "$OSTYPE" == 'linux-musl'* ]]; then
+  if [ "$OS" = "macos" ] || [ "$OS" = "ubuntu" ] || [ "$OS" = "debian" ] || [ "$OS" = "fedora" ] || [ "$OS" = "arch" ] || [ "$OS" = "alpine" ] || [ "$OS" = "linux" ]; then
     if [ -z "$INIT_CWD" ]; then
       if ! type brew &> /dev/null; then
         if type sudo &> /dev/null && sudo -n true; then
@@ -572,7 +564,7 @@ if [ -z "$NO_INSTALL_HOMEBREW" ]; then
           fi
         fi
       fi
-      if ! (grep "/bin/brew shellenv" < "$HOME/.profile" &> /dev/null) && [[ "$OSTYPE" != 'darwin'* ]]; then
+      if ! (grep "/bin/brew shellenv" < "$HOME/.profile" &> /dev/null) && [ "$OS" != "macos" ]; then
         # shellcheck disable=SC2016
         logger info 'Adding linuxbrew source command to ~/.profile'
         # shellcheck disable=SC2016

@@ -331,10 +331,10 @@ ensurePackageManagerHomebrew() {
       logg info 'Installing Homebrew. Sudo privileges available.'
       echo | bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || BREW_EXIT_CODE="$?"
       if [ -d "/opt/homebrew" ]; then
-        if id -u apple >/dev/null 2>&1; then
-          logg info "Setting owner of /opt/homebrew to 'apple'" && sudo chown -R apple /opt/homebrew || logg warn "Failed to chown /opt/homebrew to 'apple'"
+        if [ -n "$USER" ]; then
+          logg info "Setting owner of /opt/homebrew to '$USER'" && sudo chown -R "$USER" /opt/homebrew || logg warn "Failed to chown /opt/homebrew to '$USER'"
         else
-          logg warn "User 'apple' does not exist; skipping chown /opt/homebrew"
+          logg warn "USER not set; skipping chown /opt/homebrew"
         fi
       fi
       fixHomebrewSharePermissions
@@ -342,10 +342,10 @@ ensurePackageManagerHomebrew() {
       logg info 'Installing Homebrew. Sudo privileges not available. Password may be required.'
       echo | bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || BREW_EXIT_CODE="$?"
       if [ -d "/opt/homebrew" ]; then
-        if id -u apple >/dev/null 2>&1; then
-          logg info "Setting owner of /opt/homebrew to 'apple'" && sudo chown -R apple /opt/homebrew || logg warn "Failed to chown /opt/homebrew to 'apple'"
+        if [ -n "$USER" ]; then
+          logg info "Setting owner of /opt/homebrew to '$USER'" && sudo chown -R "$USER" /opt/homebrew || logg warn "Failed to chown /opt/homebrew to '$USER'"
         else
-          logg warn "User 'apple' does not exist; skipping chown /opt/homebrew"
+          logg warn "USER not set; skipping chown /opt/homebrew"
         fi
       fi
       fixHomebrewSharePermissions
@@ -1032,10 +1032,11 @@ vimPlugins() {
   fi
 }
 
-# @description Creates apple user if user is running this script as root and continues the script execution with the new `apple` user
-#     by creating the `apple` user with a password equal to the `SUDO_PASSWORD` environment variable or "bananas" if no `SUDO_PASSWORD`
-#     variable is present.
-function ensureAppleUser() {
+# @description Creates the install user when running as root so Homebrew/provisioning
+#     can continue under a non-root account. Uses INSTALL_DOCTOR_USER env var if set,
+#     falls back to $SUDO_USER, then $USER, then "install-doctor".
+function ensureInstallUser() {
+  local INSTALL_USER="${INSTALL_DOCTOR_USER:-${SUDO_USER:-${USER:-install-doctor}}}"
   # Check if the script is running as root
   if [ "$(id -u)" -eq 0 ]; then
     logg info "You are running as root. Proceeding with user creation."
@@ -1046,53 +1047,53 @@ function ensureAppleUser() {
       export SUDO_PASSWORD="bananas"
     fi
 
-    # Check if 'apple' user exists
-    if id "apple" &>/dev/null; then
-      logg info "User 'apple' already exists. Skipping creation."
+    # Check if the install user exists
+    if id "$INSTALL_USER" &>/dev/null; then
+      logg info "User '$INSTALL_USER' already exists. Skipping creation."
     else
-      # Create a new user 'apple'
-      logg info "Creating user 'apple'..."
+      # Create a new user
+      logg info "Creating user '$INSTALL_USER'..."
       if command -v useradd &>/dev/null; then
         # For Linux distributions
-        useradd -m -s /bin/bash apple
+        useradd -m -s /bin/bash "$INSTALL_USER"
       elif command -v dscl &>/dev/null; then
         # For macOS
-        dscl . -create /Users/apple
-        dscl . -create /Users/apple UserShell /bin/bash
+        dscl . -create "/Users/$INSTALL_USER"
+        dscl . -create "/Users/$INSTALL_USER" UserShell /bin/bash
         NEW_UID="$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)"
-        dscl . -create /Users/apple UniqueID "$((NEW_UID + 1))"
-        dscl . -create /Users/apple PrimaryGroupID 20
-        dscl . -create /Users/apple NFSHomeDirectory /Users/apple
-        mkdir -p /Users/apple
-        chown -R apple:staff /Users/apple
+        dscl . -create "/Users/$INSTALL_USER" UniqueID "$((NEW_UID + 1))"
+        dscl . -create "/Users/$INSTALL_USER" PrimaryGroupID 20
+        dscl . -create "/Users/$INSTALL_USER" NFSHomeDirectory "/Users/$INSTALL_USER"
+        mkdir -p "/Users/$INSTALL_USER"
+        chown -R "${INSTALL_USER}:staff" "/Users/$INSTALL_USER"
       else
         logg info "Unsupported system. Exiting."
         exit 1
       fi
 
-      # Set the password for 'apple'
-      logg info "Setting a password for 'apple'..."
-      echo "apple:$SUDO_PASSWORD" | chpasswd 2>/dev/null || \
-      (echo "$SUDO_PASSWORD" | passwd --stdin apple 2>/dev/null || \
-      (echo "$SUDO_PASSWORD" | dscl . -passwd /Users/apple $SUDO_PASSWORD 2>/dev/null))
+      # Set the password for the install user
+      logg info "Setting a password for '$INSTALL_USER'..."
+      echo "$INSTALL_USER:$SUDO_PASSWORD" | chpasswd 2>/dev/null || \
+      (echo "$SUDO_PASSWORD" | passwd --stdin "$INSTALL_USER" 2>/dev/null || \
+      (echo "$SUDO_PASSWORD" | dscl . -passwd "/Users/$INSTALL_USER" "$SUDO_PASSWORD" 2>/dev/null))
 
-      # Grant sudo privileges to 'apple'
-      logg info "Granting sudo privileges to 'apple'..."
+      # Grant sudo privileges to the install user
+      logg info "Granting sudo privileges to '$INSTALL_USER'..."
       if command -v usermod &>/dev/null; then
-        usermod -aG sudo apple
+        usermod -aG sudo "$INSTALL_USER"
       elif command -v dseditgroup &>/dev/null; then
-        dseditgroup -o edit -a apple -t user admin
+        dseditgroup -o edit -a "$INSTALL_USER" -t user admin
       else
         logg info "Unable to grant sudo privileges. Continuing anyway."
       fi
     fi
 
-    # Switch to 'apple' user to continue the script
+    # Switch to the install user to continue the script
     logg warn "Exporting environment variables to /tmp/env_vars.sh"
     export -p > /tmp/env_vars.sh
-    chown apple /tmp/env_vars.sh
-    logg info "Running source /tmp/env_vars.sh && rm -f /tmp/env_vars.sh && bash <(curl -sSL https://install.doctor/start) with the apple user"
-    su - apple -c "source /tmp/env_vars.sh && rm -f /tmp/env_vars.sh && export HOME='/home/apple' && export USER='apple' && cd /home/apple && bash <(curl -sSL https://install.doctor/start)"
+    chown "$INSTALL_USER" /tmp/env_vars.sh
+    logg info "Running source /tmp/env_vars.sh && rm -f /tmp/env_vars.sh && bash <(curl -sSL https://install.doctor/start) with the $INSTALL_USER user"
+    su - "$INSTALL_USER" -c "source /tmp/env_vars.sh && rm -f /tmp/env_vars.sh && export HOME='/home/$INSTALL_USER' && export USER='$INSTALL_USER' && cd /home/$INSTALL_USER && bash <(curl -sSL https://install.doctor/start)"
     exit 0
   else
     logg info "You are not running as root. Proceeding with the current user."
@@ -1119,7 +1120,7 @@ function ensureAppleUser() {
 #     14. **Reboot Check** - Reboots the system if required by updates
 #     15. **Post-Install** - Displays post-installation instructions
 provisionLogic() {
-  logg info "Ensuring script is not run with root" && ensureAppleUser
+  logg info "Ensuring script is not run with root" && ensureInstallUser
   logg info "Attempting to load Homebrew" && loadHomebrew
   logg info "Setting environment variables" && setEnvironmentVariables
   logg info "Handling CI variables" && setCIEnvironmentVariables

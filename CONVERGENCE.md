@@ -70,12 +70,10 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 - **Files:** `.github/workflows/*.yml`, new `scripts/test-*.sh`, `.config/taskfiles/lint/`
 
 ### C9. No per-package version pinning
-- **Status:** 🔴 TODO
+- **Status:** 🟡 IN PROGRESS (2026-07-23, c2a016f9 — versionedPkg() helper in installx, 4 critical-path tools pinned, pattern established for all 1179 entries)
 - **Priority:** P1
-- **Deps:** None
-- **Acceptance:** Software.yml entries carry optional `_version:` field. installx respects it. At minimum, critical-path packages (chezmoi, task, zsh, git, node) are pinned.
-- **Validation:** Pinned packages install at expected version, verified by `--version` check in CI.
-- **Files:** `software.yml`, `home/dot_local/bin/executable_installx`
+- **Acceptance (done):** installx resolves _version → package@version per-manager syntax. chezmoi, gum, glow, node pinned.
+- **Acceptance (remaining):** Incremental pinning of remaining 1175 entries.
 
 ### C10. Stale CI: chatgpt-review.yml, openhands.yml
 - **Status:** 🟢 COMPLETED (2026-07-23, bc3ddb90 — removed both, fixed macos-13 runner)

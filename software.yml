@@ -776,7 +776,6 @@ softwarePackages:
     _github: https://github.com/debauchee/barrier
     _bin: barrier
     _app: Barrier.app
-    _todo: TODO
     flatpak: com.github.debauchee.barrier
     cask: barrier
     choco: barrier
@@ -1710,7 +1709,6 @@ softwarePackages:
     _bin: cod
     _home: https://github.com/dim-an/cod
     _docs: https://github.com/dim-an/cod
-    _todo: Check for brew install later on (5/14/2023)
     go: github.com/dim-an/cod@master
   code2prompt:
     _name: code2prompt

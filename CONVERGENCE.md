@@ -109,7 +109,7 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 - **Files:** New script, CI workflow
 
 ### C13. No HEADLESS_INSTALL audit
-- **Status:** 🟡 TODO
+- **Status:** 🟢 COMPLETED (2026-07-23, f7be075c — all 6 interactive macOS prompts now gated)
 - **Priority:** P2
 - **Deps:** None
 - **Acceptance:** Every interactive prompt in scripts/provision.sh gated behind `[ -z "$HEADLESS_INSTALL" ]` check. Documented exceptions.

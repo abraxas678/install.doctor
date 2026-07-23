@@ -55,6 +55,23 @@ jobs:
           echo "SBOM generated: $(wc -c < sbom.json) bytes"
           echo "Components: $(python3 -c "import json; d=json.load(open('sbom.json')); print(len(d['components']))" 2>/dev/null || echo "N/A")"
 
+      - name: Check template drift (provision.sh vs provision.sh.tmpl)
+        run: |
+          if [ -f scripts/src/provision.sh.tmpl ]; then
+            TMPL_LINES=$(wc -l < scripts/src/provision.sh.tmpl | tr -d ' ')
+            LIVE_LINES=$(wc -l < scripts/provision.sh | tr -d ' ')
+            DELTA=$((LIVE_LINES - TMPL_LINES))
+            echo "Template: $TMPL_LINES lines, Live: $LIVE_LINES lines, Delta: $DELTA"
+            if [ "$DELTA" -gt 500 ]; then
+              echo "::warning::Template drift: provision.sh has $DELTA more lines than provision.sh.tmpl"
+            elif [ "$DELTA" -lt 0 ]; then
+              echo "::error::Template has MORE lines than live — likely regression"
+              exit 1
+            else
+              echo "Template drift within bounds ($DELTA lines)"
+            fi
+          fi
+
       - name: Check for source drift
         run: |
           if ! git diff --quiet || ! git diff --cached --quiet; then

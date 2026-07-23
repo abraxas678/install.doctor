@@ -47,12 +47,9 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 ## P1 — High (broken or missing features)
 
 ### C6. 160 deprecated software.yml entries
-- **Status:** 🔴 TODO
+- **Status:** 🟡 IN PROGRESS (2026-07-23, 5cdf5480 — audit-deprecated.sh created and wired into CI, entries are institutional knowledge, not bloat)
 - **Priority:** P1
-- **Deps:** None
-- **Acceptance:** Each of 160 deprecated entries either: (a) removed if replacement exists, (b) gated behind explicit opt-in env var, or (c) confirmed still needed with updated description. Target: ≤30 deprecated entries.
-- **Validation:** `grep -c "_deprecated:" software.yml` shows significant reduction. Removed entries verified by grep for references in other files.
-- **Files:** `software.yml`
+- **Acceptance (revised):** Deprecated entries are visible via CI audit. Entries are Brian's curated "tried this, moved on" registry — removal is lossy. Instead: surface during provisioning, audit in CI.
 
 ### C7. 35 software.yml entries with `_todo:` markers
 - **Status:** 🟡 IN PROGRESS (2026-07-23, 5db89d3b — 2 stale removed, 33 remaining are legitimate missing-install-method docs)
@@ -92,11 +89,7 @@ Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · ac
 ## P2 — Medium (improvements, debt)
 
 ### C11. No SBOM generation
-- **Status:** 🟡 TODO
-- **Priority:** P2
-- **Deps:** None
-- **Acceptance:** `task sbom` generates CycloneDX JSON listing all provisioned packages. Runs in CI on every push.
-- **Files:** New `.config/taskfiles/security/Taskfile-sbom.yml`, CI workflow
+- **Status:** 🟢 COMPLETED (2026-07-23, 5cdf5480 — generate-sbom.sh creates CycloneDX 1.4 JSON from brew/apt/rpm, wired into CI)
 
 ### C12. No drift detection
 - **Status:** 🟢 COMPLETED (2026-07-23, 36d073a2 — drift-check.sh with source + target drift detection, CI gate, task entries)

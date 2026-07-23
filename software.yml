@@ -1428,6 +1428,7 @@ softwarePackages:
     _home: https://www.chezmoi.io/
     _docs: https://www.chezmoi.io/user-guide/command-overview/
     _preload: true
+    _version: '>=2.40'
     brew: chezmoi
     pacman: chezmoi
     choco: chezmoi
@@ -3987,6 +3988,7 @@ softwarePackages:
     _github: https://github.com/charmbracelet/glow
     _bin: glow
     _preload: true
+    _version: '>=1.5'
     brew: glow
     scoop: glow
     github: github.com/charmbracelet/glow
@@ -4482,6 +4484,7 @@ softwarePackages:
     _home: https://charm.sh/
     _docs: https://github.com/charmbracelet/gum
     _preload: true
+    _version: '>=0.14'
     brew: gum
     pacman: gum
     go: github.com/charmbracelet/gum@latest
@@ -7413,6 +7416,7 @@ softwarePackages:
     _home: https://nodejs.org/en/
     _docs: https://nodejs.org/en/docs/
     _preload: true
+    _version: '>=22'
     brew: node
     scoop: nodejs
   node-prune:

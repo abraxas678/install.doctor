@@ -490,18 +490,38 @@ async function acquireManagerList(type, command) {
   }
 }
 
+// Resolve versioned package name per package manager syntax:
+//   brew: pkg@version   npm: pkg@version   pipx: pkg==version
+//   cargo: pkg@version  go: pkg@version    apt: pkg=version
+function versionedPkg(pkgName, version, manager) {
+  if (!version) return pkgName
+  switch (manager) {
+    case 'pipx': case 'pip': return `${pkgName}==${version}`
+    case 'apt':  case 'apk': return `${pkgName}=${version}`
+    default:     return `${pkgName}@${version}`
+  }
+}
+
 function pkgMap(pkgDefs) {
   return pkgDefs
     .map(i => {
       for (const pref of installOrder[sysType]) {
         const installKey = getPkgData(pref, pkgs[i], false)
         if (installKey) {
+          const rawList = typeof pkgs[i][installKey] === 'string' ? [pkgs[i][installKey]] : pkgs[i][installKey]
+          const version = pkgs[i]._version
+          const installList = version
+            ? rawList.map(name => versionedPkg(name, version, installKey.split(':')[0]))
+            : rawList
+          if (version) {
+            log(`  📌 ${i} pinned to ${version}`)
+          }
           return {
             ...pkgs[i],
             listKey: i,
             installKey,
             installType: installKey.split(':')[0],
-            installList: typeof pkgs[i][installKey] === 'string' ? [pkgs[i][installKey]] : pkgs[i][installKey]
+            installList
           }
         }
       }

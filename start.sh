@@ -525,9 +525,13 @@ if [ "$OS" = "macos" ]; then
     brew install curl
   fi
   if ! type git &> /dev/null; then
-    # shellcheck disable=SC2016
-    logger info 'Git is not present. A password may be required to run sudo xcode-select --install'
-    sudo xcode-select --install
+    if [ -n "${HEADLESS_INSTALL:-}" ]; then
+      logger warn 'Git is not present but HEADLESS_INSTALL is set — skipping xcode-select GUI dialog'
+    else
+      # shellcheck disable=SC2016
+      logger info 'Git is not present. A password may be required to run sudo xcode-select --install'
+      sudo xcode-select --install
+    fi
   fi
 elif [ "$OS" != "unknown" ] && [ "$OS" != "wsl" ] && [ "$OS" != "container" ]; then
   if ! type curl &> /dev/null || ! type git &> /dev/null || ! type gzip &> /dev/null || ! type sudo &> /dev/null || ! type jq &> /dev/null; then

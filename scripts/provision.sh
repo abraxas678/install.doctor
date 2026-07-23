@@ -267,11 +267,15 @@ ensureBasicDeps() {
       ### macOS
       logg info "Ensuring Xcode Command Line Tools are installed.."
       if ! xcode-select -p >/dev/null 2>&1; then
-        logg info "Command Line Tools for Xcode not found"
-        ### This temporary file prompts the 'softwareupdate' utility to list the Command Line Tools
-        touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress;
-        XCODE_PKG="$(softwareupdate -l | grep "\*.*Command Line" | tail -n 1 | sed 's/^[^C]* //')"
-        logg info "Installing from softwareupdate" && softwareupdate -i "$XCODE_PKG" && logg info "Successfully installed $XCODE_PKG"
+        if [ -n "${HEADLESS_INSTALL:-}" ]; then
+          logg warn 'Command Line Tools not installed but HEADLESS_INSTALL is set — skipping GUI softwareupdate'
+        else
+          logg info "Command Line Tools for Xcode not found"
+          ### This temporary file prompts the 'softwareupdate' utility to list the Command Line Tools
+          touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress;
+          XCODE_PKG="$(softwareupdate -l | grep "\*.*Command Line" | tail -n 1 | sed 's/^[^C]* //')"
+          logg info "Installing from softwareupdate" && softwareupdate -i "$XCODE_PKG" && logg info "Successfully installed $XCODE_PKG"
+        fi
         if command -v xcodebuild > /dev/null; then
           logg info 'Running xcodebuild -license accept'
           sudo xcodebuild -license accept
@@ -283,6 +287,8 @@ ensureBasicDeps() {
       fi
       if /usr/bin/pgrep -q oahd; then
         logg info 'Rosetta 2 is already installed'
+      elif [ -n "${HEADLESS_INSTALL:-}" ]; then
+        logg warn 'Rosetta 2 not installed but HEADLESS_INSTALL is set — skipping'
       else
         logg info 'Ensuring Rosetta 2 is installed' && softwareupdate --install-rosetta --agree-to-license
       fi
@@ -418,6 +424,11 @@ ensureHomebrew() {
 #     After determining whether or not a reboot is required, the script will attempt to automatically
 #     reboot the machine.
 handleRequiredReboot() {
+  if [ "${NO_RESTART:-}" = "true" ] || [ -n "${HEADLESS_INSTALL:-}" ]; then
+    logg info "NO_RESTART or HEADLESS_INSTALL is set — skipping automatic reboot"
+    return 0
+  fi
+
   if [ "$(detect_os)" = "macos" ]; then
     ### macOS
     if ! defaults read /Library/Updates/index.plist InstallAtLogout 2>&1 | grep 'does not exist' > /dev/null; then
@@ -1009,8 +1020,12 @@ runChezmoi() {
   if [ -f "$LOG_FILE" ] && grep -q 'chezmoi: exit status 140' "$LOG_FILE"; then
     beforeRebootDarwin
     logg info "Chezmoi signalled that a reboot is necessary to apply a system update"
-    logg info "Running softwareupdate with the reboot flag"
-    sudo softwareupdate -i -a -R --agree-to-license && exit
+    if [ "${NO_RESTART:-}" = "true" ] || [ -n "${HEADLESS_INSTALL:-}" ]; then
+      logg warn "NO_RESTART or HEADLESS_INSTALL is set — skipping softwareupdate reboot"
+    else
+      logg info "Running softwareupdate with the reboot flag"
+      sudo softwareupdate -i -a -R --agree-to-license && exit
+    fi
   fi
 
   ### Handle actual process exit code

@@ -426,10 +426,6 @@ async function installPackages(pkgInstructions) {
         break
       case 'github': // TODO
         break
-      case 'nix-env': // TODO
-      case 'nix-pkg': // TODO
-      case 'nix-shell': // TODO
-        break
       case 'pacman':
         promises.push($`sudo ${key} -Sy --noconfirm --needed ${combined[key].flatMap(x => x.installList).join(' ')}`)
         break

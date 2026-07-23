@@ -18,6 +18,34 @@ concurrency:
 
 jobs:
   # ============================================================================
+  # ShellCheck lint — fast, runs first, blocks on new violations only
+  # ============================================================================
+  lint-shell:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Lint core scripts (blocking)
+        run: |
+          shellcheck -x scripts/provision.sh start.sh || {
+            echo "::error::ShellCheck failed on core scripts — fix before merge"
+            exit 1
+          }
+
+      - name: Lint all scripts (advisory)
+        continue-on-error: true
+        run: |
+          find . -name "*.sh" -not -path "*/.git/*" -not -path "*/.claude/worktrees/*" \
+            -exec shellcheck -x {} \; 2>&1 | tee shellcheck.log
+          VIOLATIONS=$(grep -c "SC\|warning\|error" shellcheck.log || true)
+          echo "ShellCheck violations (existing): $VIOLATIONS"
+          echo "shellcheck_violations=$VIOLATIONS" >> "$GITHUB_OUTPUT"
+  # ============================================================================
   # Native container tests - fast, no QEMU overhead
   # Tests the bootstrap script directly in each distro's container
   # ============================================================================

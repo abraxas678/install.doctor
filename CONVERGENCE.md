@@ -1,0 +1,180 @@
+# Convergence List — install.doctor
+
+Auto-generated 2026-07-23. Each item: status · priority (P0–P4) · deps · acceptance criteria · validation · files.
+
+---
+
+## P0 — Critical (merge-blockers, security, correctness)
+
+### C1. Centralized `detect_os()` function
+- **Status:** 🔴 TODO
+- **Priority:** P0
+- **Deps:** None
+- **Acceptance:** Single `detect_os()` function returning `macos|ubuntu|debian|fedora|silverblue|alpine|arch|qubes-dom0|qubes-appvm|proxmox|coolify|wsl|container`. Consumed by start.sh, provision.sh, installx, and all chezmoi scripts. Replaces 25+ ad-hoc `[[ "$OSTYPE" == 'darwin'* ]]` / `[ -d /Applications ]` checks.
+- **Validation:** ShellCheck clean, returns correct OS on macOS (verified on this machine), unit tests for each OS via fake root filesystem markers.
+- **Files:** `scripts/lib/detect_os.sh` (new), `start.sh`, `scripts/provision.sh`, `home/dot_local/bin/executable_installx`, all `home/.chezmoiscripts/universal/*.sh.tmpl`
+
+### C2. Hardcoded 'apple' username in provision.sh
+- **Status:** 🔴 TODO
+- **Priority:** P0
+- **Deps:** None
+- **Acceptance:** All 8 instances of `'apple'` replaced with `"$USER"` or detected username. Provisioning works for any username.
+- **Validation:** `bash -n scripts/provision.sh` clean, grep for `'apple'` returns 0 results.
+- **Files:** `scripts/provision.sh` (lines 335, 337, 346, 348, 1049, 1051, 1054, 1074)
+
+### C3. 151 ShellCheck violations
+- **Status:** 🔴 TODO
+- **Priority:** P0
+- **Deps:** C1 (some fixes need OS detection context)
+- **Acceptance:** ShellCheck returns 0 errors/warnings on start.sh, provision.sh, and all chezmoi scripts. SC2015 (A && B || C) patterns replaced with proper if/then/else.
+- **Validation:** `find . -name "*.sh" -exec shellcheck -x {} \;` exits 0
+- **Files:** `start.sh`, `scripts/provision.sh`, all chezmoi scripts
+
+### C4. GitLab references in start.sh (repo is now on GitHub)
+- **Status:** 🔴 TODO
+- **Priority:** P0
+- **Deps:** None
+- **Acceptance:** All 5 `gitlab.com` references replaced with GitHub equivalents. Config fetch from `github.com/heymegabyte/install.doctor` instead of GitLab.
+- **Validation:** `grep -r "gitlab.com" start.sh` returns 0 results
+- **Files:** `start.sh` (lines 26, 47, 457, 491, 494)
+
+### C5. No `detect_os()` in chezmoi scripts (12 scripts duplicate OS checks)
+- **Status:** 🔴 TODO
+- **Priority:** P0
+- **Deps:** C1
+- **Acceptance:** All `home/.chezmoiscripts/universal/run_*.sh.tmpl` files source `detect_os()` instead of inline OS checks.
+- **Validation:** Each script sources `{{ .chezmoi.sourceDir }}/scripts/lib/detect_os.sh` and uses `detect_os` return value.
+- **Files:** All 10+ chezmoi scripts
+
+---
+
+## P1 — High (broken or missing features)
+
+### C6. 160 deprecated software.yml entries
+- **Status:** 🔴 TODO
+- **Priority:** P1
+- **Deps:** None
+- **Acceptance:** Each of 160 deprecated entries either: (a) removed if replacement exists, (b) gated behind explicit opt-in env var, or (c) confirmed still needed with updated description. Target: ≤30 deprecated entries.
+- **Validation:** `grep -c "_deprecated:" software.yml` shows significant reduction. Removed entries verified by grep for references in other files.
+- **Files:** `software.yml`
+
+### C7. 35 software.yml entries with `_todo:` markers
+- **Status:** 🔴 TODO
+- **Priority:** P1
+- **Deps:** None
+- **Acceptance:** Each `_todo:` entry completed or converted to a real TODO.md item. Missing install methods added, binary paths verified.
+- **Validation:** `grep -c "_todo:" software.yml` returns 0
+- **Files:** `software.yml`
+
+### C8. No automated test suite
+- **Status:** 🔴 TODO
+- **Priority:** P1
+- **Deps:** C5
+- **Acceptance:** At minimum: (a) ShellCheck in CI, (b) `bash -n` syntax check on all scripts, (c) chezmoi template render smoke test, (d) software.yml YAML schema validation. CI fails on violations.
+- **Validation:** `task lint` exits 0, `.github/workflows/test-linux.yml` includes all gates.
+- **Files:** `.github/workflows/*.yml`, new `scripts/test-*.sh`, `.config/taskfiles/lint/`
+
+### C9. No per-package version pinning
+- **Status:** 🔴 TODO
+- **Priority:** P1
+- **Deps:** None
+- **Acceptance:** Software.yml entries carry optional `_version:` field. installx respects it. At minimum, critical-path packages (chezmoi, task, zsh, git, node) are pinned.
+- **Validation:** Pinned packages install at expected version, verified by `--version` check in CI.
+- **Files:** `software.yml`, `home/dot_local/bin/executable_installx`
+
+### C10. Stale CI: chatgpt-review.yml, openhands.yml
+- **Status:** 🔴 TODO
+- **Priority:** P1
+- **Deps:** None
+- **Acceptance:** Either updated to working state or removed. These reference external services that may no longer be configured.
+- **Validation:** CI workflow files are valid YAML, `actionlint` passes.
+- **Files:** `.github/workflows/chatgpt-review.yml`, `.github/workflows/openhands.yml`
+
+---
+
+## P2 — Medium (improvements, debt)
+
+### C11. No SBOM generation
+- **Status:** 🟡 TODO
+- **Priority:** P2
+- **Deps:** None
+- **Acceptance:** `task sbom` generates CycloneDX JSON listing all provisioned packages. Runs in CI on every push.
+- **Files:** New `.config/taskfiles/security/Taskfile-sbom.yml`, CI workflow
+
+### C12. No drift detection
+- **Status:** 🟡 TODO
+- **Priority:** P2
+- **Deps:** C1
+- **Acceptance:** `task drift:check` runs `chezmoi diff` and reports any unmanaged changes. CI job runs weekly.
+- **Files:** New script, CI workflow
+
+### C13. No HEADLESS_INSTALL audit
+- **Status:** 🟡 TODO
+- **Priority:** P2
+- **Deps:** None
+- **Acceptance:** Every interactive prompt in scripts/provision.sh gated behind `[ -z "$HEADLESS_INSTALL" ]` check. Documented exceptions.
+- **Files:** `scripts/provision.sh`
+
+### C14. post-install hooks have no error handling standard
+- **Status:** 🟡 TODO
+- **Priority:** P2
+- **Deps:** None
+- **Acceptance:** Each of 30 post-install hooks follows: (a) early-exit on wrong OS, (b) set -euo pipefail, (c) structured logging via logg(), (d) idempotent.
+- **Files:** `home/dot_local/bin/post-installx/*.sh`
+
+### C15. installx still references Nix paths (nix-env, nix-pkg, nix-shell)
+- **Status:** 🟡 TODO
+- **Priority:** P2
+- **Deps:** None
+- **Acceptance:** Nix case branches in installx are removed (Nix was removed in f454d9e2). Dead code gone.
+- **Validation:** `grep -c "nix-env\|nix-pkg\|nix-shell" home/dot_local/bin/executable_installx` returns 0
+- **Files:** `home/dot_local/bin/executable_installx` (lines 429-431)
+
+---
+
+## P3 — Low (nice to have)
+
+### C16. No atuin sync hub
+- **Status:** 🟡 TODO
+- **Priority:** P3
+- **Deps:** Coolify host provisioned
+- **Acceptance:** atuin-server running on Coolify, every machine syncs encrypted shell history.
+- **Files:** `software.yml`, new `home/dot_local/bin/post-installx/executable_post-atuin-server.sh`
+
+### C17. No cross-machine deploy hook
+- **Status:** 🟡 TODO
+- **Priority:** P3
+- **Deps:** None
+- **Acceptance:** `task ssh:deploy <host>` runs chezmoi git push locally + SSH'd chezmoi update on target.
+- **Files:** New Taskfile entry
+
+### C18. No provisioning tier system
+- **Status:** 🟡 TODO
+- **Priority:** P3
+- **Deps:** C1
+- **Acceptance:** `tier:` field on software.yml entries, `auto` default reads `detect_os()`. Right subset installed per role.
+- **Files:** `software.yml`, `home/dot_local/bin/executable_installx`
+
+### C19. Qubes path not functional
+- **Status:** 🟡 TODO
+- **Priority:** P3
+- **Deps:** Qubes 4.2 machine available
+- **Acceptance:** `detect_os()` returns `qubes-dom0` or `qubes-appvm`, scripts branch correctly.
+- **Files:** `scripts/provision.sh`, chezmoi scripts
+
+### C20. Proxmox post-install hooks not implemented
+- **Status:** 🟡 TODO
+- **Priority:** P3
+- **Deps:** Proxmox host available
+- **Acceptance:** post-proxmox.sh disables enterprise repo nag, enables no-subscription repo, installs qemu-guest-agent.
+- **Files:** New `home/dot_local/bin/post-installx/executable_post-proxmox.sh`
+
+---
+
+## Key
+
+- 🔴 Not started
+- 🟡 In progress
+- 🟢 Completed
+- ⚫ Blocked
+- ❌ Won't fix (with reason)

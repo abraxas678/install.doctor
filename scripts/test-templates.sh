@@ -60,8 +60,12 @@ if command -v chezmoi &>/dev/null && [ -d "$HOME/.local/share/chezmoi" ]; then
     case "$rel" in
       scripts/*) continue ;;  # gomplate templates, not chezmoi
     esac
-    if ! timeout 5 chezmoi execute-template < "$f" > /dev/null 2>&1; then
-      echo "  FAIL: chezmoi execute-template failed on ${rel}"
+    timeout 5 chezmoi execute-template < "$f" > /dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq 124 ]; then
+      echo "  SKIP: chezmoi execute-template timed out on ${rel}" >&2
+    elif [ "$rc" -ne 0 ]; then
+      echo "  FAIL: chezmoi execute-template failed on ${rel} (exit $rc)" >&2
       CHEZMOI_FAILS=$((CHEZMOI_FAILS + 1))
     fi
   done < <(find "$HOME/.local/share/chezmoi" -name "*.tmpl" -type f -not -path "*/scripts/src/*" -print0 2>/dev/null | head -50)

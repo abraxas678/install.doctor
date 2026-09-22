@@ -1,0 +1,321 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "cleanupPeriodDays": 14,
+  "env": {
+    "API_TIMEOUT_MS": "600000",
+    "BASH_DEFAULT_TIMEOUT_MS": "600000",
+    "BASH_MAX_OUTPUT_LENGTH": "60000",
+    "BASH_MAX_TIMEOUT_MS": "600000",
+    "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1",
+    "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "1",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+    "CLAUDE_CODE_DISABLE_ARTIFACT": "1",
+    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
+    "CLAUDE_CODE_EFFORT_LEVEL": "max",
+    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
+    "EMDASH_AI_VISION_MIN": "9",
+    "EMDASH_AXE_MAX_VIOLATIONS": "0",
+    "EMDASH_FRONTEND_DEFAULT": "react-19-vite",
+    "EMDASH_FRONTEND_FALLBACK": "angular-21",
+    "EMDASH_JSONLD_REQUIRED": "true",
+    "EMDASH_LIGHTHOUSE_MIN_A11Y": "95",
+    "EMDASH_LIGHTHOUSE_MIN_BP": "95",
+    "EMDASH_LIGHTHOUSE_MIN_PERF": "90",
+    "EMDASH_LIGHTHOUSE_MIN_SEO": "95",
+    "EMDASH_PWA_REQUIRED": "true",
+    "EMDASH_SITE_MODE": "cinematic-pwa-spa",
+    "CF_ACCOUNT_ID": "84fa0d1b16ff8086dd958c468ce7fd59",
+    "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic"
+  },
+  "attribution": {
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
+  },
+  "includeGitInstructions": true,
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "Agent(*)",
+      "WebFetch(*)",
+      "WebSearch(*)",
+      "AskUserQuestion",
+      "Skill(*)",
+      "Task(*)",
+      "Workflow(*)",
+      "TaskOutput(*)",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "NotebookEdit(*)",
+      "LSP(*)",
+      "ScheduleWakeup",
+      "SendMessage",
+      "EnterPlanMode",
+      "ExitPlanMode",
+      "EnterWorktree",
+      "ExitWorktree",
+      "mcp__playwright__*",
+      "mcp__plugin_playwright__*",
+      "mcp__chrome-devtools__*",
+      "mcp__browserbase__*",
+      "mcp__stagehand__*",
+      "mcp__github__*",
+      "mcp__plugin_cloudflare__*",
+      "mcp__posthog__*",
+      "mcp__stripe__*",
+      "mcp__context7__*",
+      "mcp__plugin_context7__*",
+      "mcp__resend__*",
+      "mcp__tinybird__*",
+      "mcp__upstash__*",
+      "mcp__replicate__*",
+      "mcp__neon__*",
+      "mcp__mem0__*",
+      "mcp__langfuse__*",
+      "mcp__bitwarden__*",
+      "mcp__desktop-control__*",
+      "mcp__exa__*",
+      "mcp__angular-cli__*"
+    ],
+    "defaultMode": "bypassPermissions"
+  },
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "Bash(npm build*)|Bash(wrangler deploy*)|Bash(docker build*)|Bash(git push*)|Bash(pnpm build*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "osascript -e 'display notification \"Operation completed\" with title \"Claude Code\"' 2>/dev/null || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/enforce-tdd-e2e.py 2>&1 || true",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/router-reconcile-on-skill-write.py 2>/dev/null || true",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/config-protection.py 2>/dev/null || true",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Bash|Grep|WebFetch|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/guard-oversized-output.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "WebFetch|WebSearch|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/pretooluse-router.py 2>/dev/null || true",
+            "timeout": 8
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/destructive-bash-guard.py 2>/dev/null || true",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/secret-scan-prewrite.py 2>/dev/null || true",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/guard-oversized-read.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/guard-fat-agent.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/session-start-reminders.py 2>/dev/null || true",
+            "async": true
+          },
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/session-start-router.py 2>/dev/null || true",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/hooks/session-start-dashboard.sh 2>/dev/null || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/sync-desktop-skills.py 2>/dev/null || true",
+            "timeout": 8
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/hooks/agentskills-stop-gate.sh 2>/dev/null || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/pretooluse-model-cascade.py 2>/dev/null || true",
+            "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/pretooluse-decompose.py 2>/dev/null || true",
+            "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/sync-desktop-skills.py 2>/dev/null || true",
+            "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/userpromptsubmit-router.py 2>/dev/null || true",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  },
+  "worktree": {
+    "symlinkDirectories": [
+      "node_modules",
+      ".cache",
+      ".turbo",
+      ".next",
+      ".nuxt",
+      ".vite",
+      ".angular",
+      "dist",
+      "build",
+      "coverage",
+      "playwright-report",
+      "test-results"
+    ],
+    "baseRef": "fresh"
+  },
+  "defaultShell": "bash",
+  "enabledPlugins": {
+    "agent-sdk-dev@claude-plugins-official": true,
+    "claude-code-setup@claude-plugins-official": false,
+    "cloudflare@claude-plugins-official": true,
+    "code-simplifier@claude-plugins-official": true,
+    "context7@claude-plugins-official": true,
+    "feature-dev@claude-plugins-official": true,
+    "firecrawl@claude-plugins-official": false,
+    "frontend-design@claude-plugins-official": true,
+    "github@claude-plugins-official": true,
+    "mcp-server-dev@claude-plugins-official": true,
+    "mcp-tunnels@claude-plugins-official": true,
+    "nx@nx-claude-plugins": true,
+    "playwright@claude-plugins-official": true,
+    "plugin-dev@claude-plugins-official": true,
+    "posthog@claude-plugins-official": true,
+    "ralph-loop@claude-plugins-official": false,
+    "resend@claude-plugins-official": false,
+    "sentry@claude-plugins-official": false,
+    "shopify-ai-toolkit@claude-plugins-official": false,
+    "stripe@claude-plugins-official": true,
+    "superpowers@claude-plugins-official": false,
+    "twilio-developer-kit@claude-plugins-official": false,
+    "typescript-lsp@claude-plugins-official": true,
+    "ui5-modernization@claude-plugins-official": false
+  },
+  "viewMode": "verbose",
+  "spinnerVerbs": {
+    "mode": "append",
+    "verbs": [
+      "shipping",
+      "refactoring",
+      "wiring",
+      "hardening",
+      "composing",
+      "auditing"
+    ]
+  },
+  "autoCompactWindow": 900000,
+  "awaySummaryEnabled": true,
+  "autoUpdatesChannel": "stable",
+  "tui": "fullscreen",
+  "skipDangerousModePermissionPrompt": true,
+  "verbose": true,
+  "autoCompactEnabled": true,
+  "wheelScrollAccelerationEnabled": true,
+  "terminalProgressBarEnabled": true,
+  "teammateMode": "auto",
+  "model": "deepseek-chat",
+  "apiKeyHelper": "/Users/Apple/.claude/hooks/deepseek-apikey-helper.sh"
+}
